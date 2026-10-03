@@ -1,13 +1,13 @@
 # StopWatch Vibe
 
-M5Stack StopWatch C152 的有线 USB 麦克风和双键键盘固件，面向 Mac 上的语音编程。当前已刷入版本为 v6。
+M5Stack StopWatch C152 的有线 USB 麦克风和双键键盘固件，面向 Mac 上的语音编程。当前已刷入版本为 v7。
 
 - 黄色左键：右 Option（USB Right Alt，按住保持、松开释放）。
 - 蓝色键：Enter。两键同时按是 Option+Enter；长按 Enter 的重复行为由电脑决定。
 - 麦克风：内置 ES8311，48 kHz / 16 bit / 单声道 USB Audio；始终采集，无须按键，不启用 Wi-Fi 或蓝牙。
 - 屏幕：黑底青绿色麦克风，音量驱动闪动；黄色键按住时变为琥珀色脉动。红色代表麦克风初始化失败。
 - 断线重插时，必须先松开两键，避免重放旧按键。
-- v6 启动时将 M5PM1 状态灯输出设为低电平，只清除 PWR_CFG 的 bit4，保留充电和供电位。电源芯片自动闪灯是否同时停止，需要实物确认。
+- 启动时关闭 M5PM1 状态灯输出，保留充电和供电位。v7 另提供受保护的整机电源重启命令；本机执行后，用户确认此前持续闪烁的绿灯已停止，详情见验证记录。
 
 macOS 将它识别为 `StopWatch Vibe`，使用系统自带的 USB 音频和键盘驱动。首次使用请在系统或目标应用中选择这个输入设备；USB 固件无法强制另一台电脑切换默认麦克风。语音转文字和快捷键触发行为由电脑上的应用负责，固件不做识别、不保存录音、不发送网络请求。
 
@@ -35,7 +35,11 @@ clang++ -std=c++17 tests/buttons.cpp -o /tmp/stopwatch-buttons-test
 
 `tools/flash.py` 是这台已验证设备的保护性刷写入口，依赖本地 `backups/` 文件，GitHub 不包含这些备份。它校验完整原固件备份及设备身份，只刷写指定 StopWatch；使用 watchdog reset 退出下载模式。不要在启动过程中用通用串口程序操作 `303A:1001` 的 DTR/RTS，否则可能重新进入下载模式。固件诊断接口为 `CAFE:4020`，串口名称可随 USB 插口变化。
 
-诊断串口每秒输出 `VIBE` 状态：采样计数、电平、按键、运行时间、重启原因及错误计数。v5 还包含 BOOT 引脚 `g0`、黄/蓝按键累计次数 `presses`、电源按键状态 `pm_btn` 和配置 `pm_cfg`，用于调查按黄色键后黑屏。v6 增加电源寄存器 `pm_pwr` 和 LED 配置读回校验 `led_cfg_ok`。`P` 返回 `FRAME 360 360 259200` 后接 RGB565 大端屏幕帧；进入 ROM 下载模式必须依次发送完整的 `VIBE/1 ARM-BOOT 288485439560\n` 与 `VIBE/1 CONFIRM-BOOT 288485439560\n`，两步间隔不超过 2 秒；单字节 `B` 不再触发复位。`drops` 包含电脑未打开麦克风时主动丢弃的旧音频，不等同于录音丢帧；电脑录音期间应检查 `underflows` 和 `errors` 不增长。
+诊断串口每秒输出 `VIBE` 状态：采样计数、电平、按键、运行时间、重启原因及错误计数。v5 还包含 BOOT 引脚 `g0`、黄/蓝按键累计次数 `presses`、电源按键状态 `pm_btn` 和配置 `pm_cfg`，用于调查按黄色键后黑屏。v6 增加电源寄存器 `pm_pwr` 和 LED 配置读回校验 `led_cfg_ok`；v7 增加 PMIC 标识 `pm_id`、第二按键配置 `pm_cfg2`、GPIO 复用/驱动/输入 `pm_func`/`pm_drv`/`pm_io`，以及本轮读取是否成功的 `pm_valid`。`P` 返回 `FRAME 360 360 259200` 后接 RGB565 大端屏幕帧。
+
+维护命令必须成对发送完整行，两步间隔不超过 2 秒。进入 ROM 下载模式使用 `VIBE/1 ARM-BOOT 288485439560\n` 与 `VIBE/1 CONFIRM-BOOT 288485439560\n`。通过 M5PM1 重启整机使用 `VIBE/1 ARM-RESET 288485439560\n` 与 `VIBE/1 CONFIRM-RESET 288485439560\n`；仅在显式收到这组命令时执行一次，不会每次启动自动重启。两种确认不能混用，单字节 `B` 不再触发复位。后者会短暂断开 USB，适用于排查仅重启 ESP32 后仍保留的 PMIC 状态。
+
+`drops` 包含电脑未打开麦克风时主动丢弃的旧音频，不等同于录音丢帧；电脑录音期间应检查 `underflows` 和 `errors` 不增长。
 
 其他 StopWatch 请先使用 esptool 完整备份自己的 16 MiB Flash，再按构建输出中的地址刷写 bootloader、partition table 和 app，并使用 `--after watchdog-reset`。当前 USB 序列号是这台个人原型的固定编号，多台同时使用时应改为各自唯一编号。
 

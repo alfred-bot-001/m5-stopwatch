@@ -119,7 +119,9 @@ static void control_task(void *arg) {
    char c=tud_cdc_read_char();
    if(c=='P' && !snapshot){snapshot=vibe_snapshot(&snap_size);snap_pos=0;
     if(snapshot){char h[64];int n=snprintf(h,sizeof(h),"FRAME 360 360 %u\n",(unsigned)snap_size);tud_cdc_write(h,n);tud_cdc_write_flush();}}
-   if(maintenance_byte(&maintenance,c,xTaskGetTickCount())) {
+   maintenance_action_t action=maintenance_byte(&maintenance,c,pdTICKS_TO_MS(xTaskGetTickCount()));
+   if(action==MAINT_POWER_RESET)vibe_request_power_reset();
+   if(action==MAINT_BOOT) {
     tud_disconnect();vTaskDelay(pdMS_TO_TICKS(50));
     periph_module_reset(PERIPH_USB_MODULE);periph_module_disable(PERIPH_USB_MODULE);
     CLEAR_PERI_REG_MASK(RTC_CNTL_USB_CONF_REG,RTC_CNTL_SW_HW_USB_PHY_SEL|RTC_CNTL_SW_USB_PHY_SEL|RTC_CNTL_USB_PAD_ENABLE);
@@ -135,8 +137,8 @@ static void control_task(void *arg) {
     snap_pos+=tud_cdc_write(snapshot+snap_pos,n);tud_cdc_write_flush();
     if(snap_pos==snap_size){free(snapshot);snapshot=NULL;}}
   }
-  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>384) {
-   last=now; char line[384]; vibe_status(line,sizeof(line));
+  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>512) {
+   last=now; char line[512]; vibe_status(line,sizeof(line));
    tud_cdc_write(line,strlen(line));tud_cdc_write_flush();
   }
   vTaskDelay(pdMS_TO_TICKS(1));
