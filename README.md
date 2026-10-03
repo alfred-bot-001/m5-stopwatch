@@ -1,15 +1,17 @@
 # StopWatch Vibe
 
-M5Stack StopWatch C152 的有线 USB 麦克风和双键键盘固件，面向 Mac 上的语音编程。当前已刷入版本为 v7。
+M5Stack StopWatch C152 的有线 USB 麦克风、双键键盘和触摸滚轮固件，面向 Mac 上的语音编程。当前已刷入 v8，增加按住采音和滑动操作；实测范围见 [验证记录](VALIDATION.md)。
 
-- 黄色左键：右 Option（USB Right Alt，按住保持、松开释放）。
+- 黄色左键：按住开启麦克风，同时保持右 Option（USB Right Alt）；松开关闭采集并释放按键。
 - 蓝色键：Enter。两键同时按是 Option+Enter；长按 Enter 的重复行为由电脑决定。
-- 麦克风：内置 ES8311，48 kHz / 16 bit / 单声道 USB Audio；始终采集，无须按键，不启用 Wi-Fi 或蓝牙。
-- 屏幕：黑底青绿色麦克风，音量驱动闪动；黄色键按住时变为琥珀色脉动。红色代表麦克风初始化失败。
+- 麦克风：内置 ES8311，48 kHz / 16 bit / 单声道 USB Audio。未按黄色键时停止 I2S 采集，关闭 ADC 模拟电路、清空缓存，USB 音频接口保持连接并输出静音；不启用 Wi-Fi 或蓝牙。芯片重新启动需要时间，特别是首次冷启动可能约一秒，按住后稍等再说话。
+- 屏幕左右滑：发送左/右方向键，移动文字光标；每滑动约 24 屏幕像素一步。若同时按黄色键，电脑会收到 Option+方向键。
+- 屏幕上下滑：发送鼠标滚轮，上滑为正向滚轮、下滑为反向；实际页面方向受 macOS 的「自然滚动」设置影响。手势锁定首次明确的横/纵方向，抬手后重新判定；轻点和小幅抖动不触发。
+- 屏幕：闲置时显示青绿色带斜线麦克风，按住黄色键时显示琥珀色脉动麦克风。红色代表麦克风初始化失败。待机绘制频率降为约 10fps；未测量整机电流或续航增益。
 - 断线重插时，必须先松开两键，避免重放旧按键。
 - 启动时关闭 M5PM1 状态灯输出，保留充电和供电位。v7 另提供受保护的整机电源重启命令；本机执行后，用户确认此前持续闪烁的绿灯已停止，详情见验证记录。
 
-macOS 将它识别为 `StopWatch Vibe`，使用系统自带的 USB 音频和键盘驱动。首次使用请在系统或目标应用中选择这个输入设备；USB 固件无法强制另一台电脑切换默认麦克风。语音转文字和快捷键触发行为由电脑上的应用负责，固件不做识别、不保存录音、不发送网络请求。
+macOS 将它识别为 `StopWatch Vibe`，使用系统自带的 USB 音频、键盘和鼠标驱动。键盘与鼠标共用 HID 接口，以 Report ID 1/2 区分，适配 ESP32-S3 的输入端点数量限制。首次使用请在系统或目标应用中选择这个输入设备；USB 固件无法强制另一台电脑切换默认麦克风。语音转文字和快捷键触发行为由电脑上的应用负责，固件不做识别、不保存录音、不发送网络请求。
 
 ## 构建与刷写
 
@@ -31,6 +33,10 @@ bash tools/build.sh build
 ../.tools/esp32-test/bin/python tools/flash.py
 clang++ -std=c++17 tests/buttons.cpp -o /tmp/stopwatch-buttons-test
 /tmp/stopwatch-buttons-test
+clang++ -std=c++17 tests/gestures.cpp -o /tmp/stopwatch-gestures-test
+/tmp/stopwatch-gestures-test
+# 在 ESP-IDF Python 环境中（需要 pyelftools）：
+python tests/usb_descriptors.py build/stopwatch_vibe.elf
 ```
 
 `tools/flash.py` 是这台已验证设备的保护性刷写入口，依赖本地 `backups/` 文件，GitHub 不包含这些备份。它校验完整原固件备份及设备身份，只刷写指定 StopWatch；使用 watchdog reset 退出下载模式。不要在启动过程中用通用串口程序操作 `303A:1001` 的 DTR/RTS，否则可能重新进入下载模式。固件诊断接口为 `CAFE:4020`，串口名称可随 USB 插口变化。
@@ -39,7 +45,7 @@ clang++ -std=c++17 tests/buttons.cpp -o /tmp/stopwatch-buttons-test
 
 维护命令必须成对发送完整行，两步间隔不超过 2 秒。进入 ROM 下载模式使用 `VIBE/1 ARM-BOOT 288485439560\n` 与 `VIBE/1 CONFIRM-BOOT 288485439560\n`。通过 M5PM1 重启整机使用 `VIBE/1 ARM-RESET 288485439560\n` 与 `VIBE/1 CONFIRM-RESET 288485439560\n`；仅在显式收到这组命令时执行一次，不会每次启动自动重启。两种确认不能混用，单字节 `B` 不再触发复位。后者会短暂断开 USB，适用于排查仅重启 ESP32 后仍保留的 PMIC 状态。
 
-`drops` 包含电脑未打开麦克风时主动丢弃的旧音频，不等同于录音丢帧；电脑录音期间应检查 `underflows` 和 `errors` 不增长。
+v8 中 `mic` 表示硬件采集是否运行，`listen` 表示当前是否请求按住采音；闲置时两者应为 0，`samples` 应停止增长。`gestures` 是累计发送到队列的水平光标步数/滚轮步数，`gesture_drops` 是队列满时丢弃的事件数，不能将其当作电脑已经处理手势的证明。`drops` 包含按住黄色键但电脑未打开麦克风时主动丢弃的旧音频，不等同于录音丢帧；静音期间不增加 `underflows`。
 
 其他 StopWatch 请先使用 esptool 完整备份自己的 16 MiB Flash，再按构建输出中的地址刷写 bootloader、partition table 和 app，并使用 `--after watchdog-reset`。当前 USB 序列号是这台个人原型的固定编号，多台同时使用时应改为各自唯一编号。
 

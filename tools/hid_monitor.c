@@ -12,7 +12,7 @@ int main(int argc,char **argv){
  int vid=0xcafe,pid=0x4020;CFNumberRef v=CFNumberCreate(NULL,kCFNumberIntType,&vid),p=CFNumberCreate(NULL,kCFNumberIntType,&pid);
  const void *keys[]={CFSTR(kIOHIDVendorIDKey),CFSTR(kIOHIDProductIDKey)};const void *values[]={v,p};
  CFDictionaryRef match=CFDictionaryCreate(NULL,keys,values,2,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
- IOHIDManagerSetDeviceMatching(m,match);IOReturn rc=IOHIDManagerOpen(m,kIOHIDOptionsTypeSeizeDevice);
+ IOHIDManagerSetDeviceMatching(m,match);IOReturn rc=IOHIDManagerOpen(m,kIOHIDOptionsTypeNone);
  printf("HID_OPEN %x\n",rc);fflush(stdout);if(rc)return 1;
  IOHIDManagerRegisterInputReportCallback(m,report,NULL);IOHIDManagerScheduleWithRunLoop(m,CFRunLoopGetCurrent(),kCFRunLoopDefaultMode);
  CFRunLoopRunInMode(kCFRunLoopDefaultMode,argc>1?atoi(argv[1]):60,false);

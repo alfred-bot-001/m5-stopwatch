@@ -9,6 +9,7 @@ void vibe_usb_init(void);
 void vibe_connected(bool connected);
 void vibe_service(void);
 bool vibe_report(uint8_t report[8]);
+bool vibe_wheel(int8_t *wheel);
 void vibe_pcm(int16_t *data, size_t samples);
 void vibe_status(char *buffer, size_t size);
 void vibe_request_power_reset(void);

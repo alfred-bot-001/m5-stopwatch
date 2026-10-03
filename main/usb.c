@@ -18,12 +18,17 @@
 #include "freertos/queue.h"
 #include <stdarg.h>
 
-static const uint8_t hid_descriptor[] = { TUD_HID_REPORT_DESC_KEYBOARD() };
+// Share one IN endpoint: ESP32-S3 has five IN endpoints including EP0.
+enum { REPORT_KEYBOARD=1, REPORT_MOUSE=2 };
+static const uint8_t hid_descriptor[] = {
+ TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(REPORT_KEYBOARD)),
+ TUD_HID_REPORT_DESC_MOUSE(HID_REPORT_ID(REPORT_MOUSE))
+};
 static const tusb_desc_device_t device = {
  .bLength=sizeof(tusb_desc_device_t), .bDescriptorType=TUSB_DESC_DEVICE,
  .bcdUSB=0x0200, .bDeviceClass=TUSB_CLASS_MISC, .bDeviceSubClass=MISC_SUBCLASS_COMMON,
  .bDeviceProtocol=MISC_PROTOCOL_IAD, .bMaxPacketSize0=64,
- .idVendor=0xcafe, .idProduct=0x4020, .bcdDevice=0x0100,
+ .idVendor=0xcafe, .idProduct=0x4020, .bcdDevice=0x0102,
  .iManufacturer=1, .iProduct=2, .iSerialNumber=3, .bNumConfigurations=1
 };
 enum { AUDIO_CONTROL, AUDIO_STREAM, KEYBOARD, CDC_CONTROL, CDC_DATA, INTERFACES };
@@ -31,7 +36,7 @@ enum { AUDIO_CONTROL, AUDIO_STREAM, KEYBOARD, CDC_CONTROL, CDC_DATA, INTERFACES 
 static const uint8_t configuration[] = {
  TUD_CONFIG_DESCRIPTOR(1, INTERFACES, 0, TOTAL_LEN, 0, 500),
  TUD_AUDIO_MIC_ONE_CH_DESCRIPTOR(AUDIO_CONTROL, 4, 2, 16, 0x81, CFG_TUD_AUDIO_EP_SZ_IN),
- TUD_HID_DESCRIPTOR(KEYBOARD, 5, HID_ITF_PROTOCOL_KEYBOARD, sizeof(hid_descriptor), 0x82, 8, 2),
+ TUD_HID_DESCRIPTOR(KEYBOARD, 5, HID_ITF_PROTOCOL_NONE, sizeof(hid_descriptor), 0x82, 16, 2),
  TUD_CDC_DESCRIPTOR(CDC_CONTROL, 6, 0x83, 8, 0x04, 0x84, 64),
 };
 _Static_assert(sizeof(configuration)==TOTAL_LEN,"USB descriptor length");
@@ -41,7 +46,7 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance) {(void)instance;re
 uint16_t const *tud_descriptor_string_cb(uint8_t index,uint16_t langid) {
  (void)langid;
  static uint16_t result[64];
- static const char *strings[]={"", "Local prototype", "StopWatch Vibe", "288485439560-VIBE1", "StopWatch Vibe Microphone", "StopWatch Vibe Keyboard", "Diagnostics"};
+ static const char *strings[]={"", "Local prototype", "StopWatch Vibe", "288485439560-VIBE1", "StopWatch Vibe Microphone", "StopWatch Vibe Controls", "Diagnostics"};
  if(index==0){result[0]=0x0304;result[1]=0x0409;return result;}
  if(index>=sizeof(strings)/sizeof(strings[0]))return NULL;
  size_t n=strlen(strings[index]);if(n>63)n=63;
@@ -53,6 +58,8 @@ static uint8_t last_hid[8];
 uint16_t tud_hid_get_report_cb(uint8_t instance,uint8_t id,hid_report_type_t type,uint8_t *buffer,uint16_t length) {
  (void)instance;(void)id;
  if(type!=HID_REPORT_TYPE_INPUT)return 0;
+ if(id==REPORT_MOUSE){uint16_t n=length<5?length:5;memset(buffer,0,n);return n;}
+ if(id!=REPORT_KEYBOARD)return 0;
  uint16_t n=length<8?length:8;memcpy(buffer,last_hid,n);return n;
 }
 void tud_hid_set_report_cb(uint8_t instance,uint8_t id,hid_report_type_t type,const uint8_t *buffer,uint16_t size) {
@@ -105,16 +112,19 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t port,uint8_t itf,uint8_t ep,uint8_t a
 
 static void control_task(void *arg) {
  (void)arg; bool pending=false; uint8_t report[8]; uint32_t last=0;
+ bool mouse_pending=false;int8_t wheel=0;
  uint8_t *snapshot=NULL;size_t snap_size=0,snap_pos=0;
  maintenance_t maintenance={0};
  for(;;) {
   vibe_service();
-  if(!tud_mounted() || tud_suspended())pending=false;
+  if(!tud_mounted() || tud_suspended()){pending=false;mouse_pending=false;}
   if(!tud_cdc_connected())memset(&maintenance,0,sizeof(maintenance));
   if(!pending && tud_mounted())pending=vibe_report(report);
-  if(pending && tud_hid_ready() && tud_hid_report(0,report,8)) {
+  if(pending && tud_hid_ready() && tud_hid_report(REPORT_KEYBOARD,report,8)) {
    memcpy(last_hid,report,8);pending=false;
   }
+  if(!mouse_pending && tud_mounted() && !tud_suspended())mouse_pending=vibe_wheel(&wheel);
+  if(mouse_pending && tud_hid_ready() && tud_hid_mouse_report(REPORT_MOUSE,0,0,0,wheel,0))mouse_pending=false;
   while(tud_cdc_available()) {
    char c=tud_cdc_read_char();
    if(c=='P' && !snapshot){snapshot=vibe_snapshot(&snap_size);snap_pos=0;
