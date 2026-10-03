@@ -1,0 +1,4 @@
+# Name, Type, SubType, Offset, Size
+nvs,data,nvs,0x9000,0x6000
+factory,app,factory,0x10000,4M
+coredump,data,coredump,0x410000,128K

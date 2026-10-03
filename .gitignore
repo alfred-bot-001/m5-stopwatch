@@ -1,0 +1,9 @@
+build*/
+backups/
+reports/
+sdkconfig
+.DS_Store
+tools/coreaudio_capture
+tools/hid_monitor
+sdkconfig.old
+tools/select_input
