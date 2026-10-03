@@ -1,6 +1,7 @@
 // USB descriptor templates and UAC control layout: TinyUSB, MIT License.
 #include "tusb.h"
 #include "vibe.h"
+#include "maintenance.h"
 #include "esp_private/usb_phy.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -105,9 +106,11 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t port,uint8_t itf,uint8_t ep,uint8_t a
 static void control_task(void *arg) {
  (void)arg; bool pending=false; uint8_t report[8]; uint32_t last=0;
  uint8_t *snapshot=NULL;size_t snap_size=0,snap_pos=0;
+ maintenance_t maintenance={0};
  for(;;) {
   vibe_service();
   if(!tud_mounted() || tud_suspended())pending=false;
+  if(!tud_cdc_connected())memset(&maintenance,0,sizeof(maintenance));
   if(!pending && tud_mounted())pending=vibe_report(report);
   if(pending && tud_hid_ready() && tud_hid_report(0,report,8)) {
    memcpy(last_hid,report,8);pending=false;
@@ -116,7 +119,7 @@ static void control_task(void *arg) {
    char c=tud_cdc_read_char();
    if(c=='P' && !snapshot){snapshot=vibe_snapshot(&snap_size);snap_pos=0;
     if(snapshot){char h[64];int n=snprintf(h,sizeof(h),"FRAME 360 360 %u\n",(unsigned)snap_size);tud_cdc_write(h,n);tud_cdc_write_flush();}}
-   if(c=='B') {
+   if(maintenance_byte(&maintenance,c,xTaskGetTickCount())) {
     tud_disconnect();vTaskDelay(pdMS_TO_TICKS(50));
     periph_module_reset(PERIPH_USB_MODULE);periph_module_disable(PERIPH_USB_MODULE);
     CLEAR_PERI_REG_MASK(RTC_CNTL_USB_CONF_REG,RTC_CNTL_SW_HW_USB_PHY_SEL|RTC_CNTL_SW_USB_PHY_SEL|RTC_CNTL_USB_PAD_ENABLE);

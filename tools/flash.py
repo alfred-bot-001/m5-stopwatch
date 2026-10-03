@@ -16,7 +16,13 @@ assert hashlib.sha256(backup.read_bytes()).hexdigest() == manifest['sha256']
 for port in comports():
     if port.vid == 0xcafe and port.pid == 0x4020 and port.serial_number == '288485439560-VIBE1':
         with serial.Serial(port.device, 115200, timeout=1) as conn:
-            conn.write(b'B')
+            status = b''.join(conn.readline() for _ in range(3))
+            if b'VIBE v=4 ' in status or b'VIBE v=3 ' in status:
+                conn.write(b'B')  # One-time migration from the old firmware.
+            elif b'VIBE v=5 ' in status:
+                conn.write(b'\nVIBE/1 ARM-BOOT 288485439560\nVIBE/1 CONFIRM-BOOT 288485439560\n')
+            else:
+                sys.exit('Unknown running firmware; refusing to send a boot command')
             conn.flush()
         break
 deadline = time.monotonic() + 15
