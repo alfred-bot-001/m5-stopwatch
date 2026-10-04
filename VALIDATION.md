@@ -54,3 +54,31 @@ v6 启动时调用 `M5.Power.M5pm1.setLedEnLevel(false)`，只清除 PWR_CFG (0x
 v9 仅扩展 PMIC 诊断读数和串口状态缓冲区，不改变 v8 的采音与手势逻辑，也未启用自动重启、下载锁定或新的电源定时动作。编译、烧录及编译产物 USB 描述符检查通过。恢复后的读数为 `pm_sleep=00`、`pm_wdt=0`、`pm_timer=00/0`、电池 4.160–4.162V、USB 5.142–5.150V，`errors=0`；这些不是故障瞬间的供电证据。
 
 新增有时限的本地诊断记录工具：仅打开指定应用 CDC，ROM 模式只记录枚举，不打开、不复位；不采集音频内容。7 秒实测确认日志包含起止事件和 v9 状态并正常退出。随后启动最多 24 小时记录，日志留在本地忽略目录；需要设备再次复现才能进一步分析，不能宣称黑屏问题已修复。
+
+## v10 官方对照与故障取证补充（2026-10-04）
+
+用户再次报告 USB 连接期间闲置半天后黑屏、绿灯频闪。开始操作时，目标设备已经枚举为 `303A:1001` ROM；另一个 ESP32 的 MAC 不同，所有维护操作均按目标 MAC/序列号过滤。进入 ROM 的原因仍未确定。
+
+对照的主要资料与结论：
+
+- [M5PM1 官方手册](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1207/M5PM1_Datasheet_CN.pdf) 将 500ms 闪灯列为下载模式提示；PWR_BTN 长按可以进入该模式。BTN_Status bit0 文档含义是 1=按下、0=松开，bit7 是读取即清除的事件。旧状态输出可能漏掉读取间隔内的事件，因此改为累计计数；寄存器读数不等同于独立的物理按键验收。
+- [官方 StopWatch 电源实现](https://github.com/m5stack/M5StopWatch-UserDemo/blob/main/main/hal/hal_pmic.cpp) 和 [M5PM1 驱动](https://github.com/m5stack/M5PM1/blob/main/src/M5PM1.cpp) 未提供对应的“正常闲置后进 ROM”修复。现有 M5GFX 初始化已经关闭 PMIC I2C 空闲休眠和看门狗；本机之前的 `00/0` 读数也不支持将故障归因于这些定时功能。官方示例配置 CHG_PROG 引脚与本项目有差异，但缺乏故障因果证据，本次未改充电控制。
+- [voice-coding-badge](https://github.com/Jiaranbb/voice-coding-badge) 使用 BLE 键盘、没有 USB 麦克风；其显示重初始化逻辑不能解释本机整个应用消失并变成 ROM 接口。[M5StopWatch-MQTT-Counter](https://github.com/slochewie/M5StopWatch-MQTT-Counter) 的主动睡眠设计也不是本项目当前行为。
+- [Espressif USB 文档](https://docs.espressif.com/projects/esp-usb/en/latest/esp32s3/usb_device.html#external-phy-configuration) 说明 USB OTG 与 Serial/JTAG 共用内部 PHY。项目正确选择 OTG，未实现会因 CDC DTR/RTS 或波特率变化而重启的回调。关闭闲置 USJ 控制器可减少排查变量，但不证明它是故障来源。[IDF #13287](https://github.com/espressif/esp-idf/issues/13287) 讨论已进下载后不能返回应用的情况，不能作为本次最初进入下载的解释。
+
+本次现场限制：上轮 v9 日志只记录到本地时间 09:45:09，最后运行约 93 分钟且状态正常；进程后来已不在，没有记录故障时刻。日志停止不能当作设备故障时间。故障后 ROM 寄存器读到 reset=0x15，但 [pySerial 文档](https://pyserial.readthedocs.io/en/stable/pyserial_api.html#serial.Serial.open) 明确串口打开时 RTS/DTR 可能短暂改变；这可能覆盖原始复位原因，不能据此断言电脑触发了最初故障。Flash 中未发现可用的崩溃转储头，也不足以证明没有崩溃。
+
+v10 改动：
+
+- 禁用未使用的 USJ 控制台；在 OTG 接管 PHY 后明确关闭 USJ pad/clock，覆盖 CPU-only reset 路径。受保护下载命令执行前重新打开 USJ 时钟；未烧写 eFuse、未设置 PMIC 下载锁。
+- 电源键事件读清前保存累计数、最近时间及原始 bit0 高电平持续时间。后续其他寄存器读取失败也保留已经取得的事件。
+- 在应用入口保存原始复位/启动引脚值，累计 USB 连接/断开/暂停/恢复次数；RTC_NOINIT 保存带版本及校验的最后状态和显式维护意图。原始记录 56 字节，本次 ELF 地址 `0x50000000`；地址应以每次构建符号为准。完整硬件重置或掉电可能使记录丢失。
+- 诊断工具增加主机心跳、进程 PID、异常与信号退出原因，以及跨进程重启共享的绝对截止时间。日志只读应用串口，ROM 只枚举；不录音、不自动恢复。
+
+验证：ESP-IDF 编译、原生诊断和维护解析器测试、7 项诊断工具隔离测试、编译产物 USB 描述符检查通过。最终固件烧录哈希校验通过；实机 `usj_clk=0`，macOS 注册 USB Audio、共享 HID 和 CDC。显式维护下载后，ROM 成功读回校验正确且 `intent=1` 的 RTC 状态，watchdog reset 后应用恢复。随后执行一次显式 M5PM1 A2 系统重启，USB 恢复、错误计数为 0。A2 是由 PMIC 执行的系统重启，不等同于让始终供电的 PMIC 自身完全断电。
+
+新的待核实线索：用户明确确认未按、未顶住红色电源键，但恢复后 `pm_btn=01` 持续存在，A2 系统重启后仍为 01。单凭此读数不能断言按键硬件损坏、用户误按或 PMIC 固件错误；需核对实际按下/释放时该版本寄存器的变化。`pm_hold` 目前按手册记录 bit0 高电平时长，不能直接当作用户按住的时长。
+
+最终 v10 的 CoreAudio 待机测试收到 144,000 个样本（3 秒），全部为零，临时音频已删除。新增改动未改按住采音、键位和手势算法；本轮只验证了 USB 枚举、待机音频和维护通道，不将其表述为所有实体操作已重新验收。
+
+本机已通过临时 launchd 任务运行只读诊断，固定截止时间为 2026-10-05 22:19:11（Asia/Singapore）；异常退出可重启，达到原定期限即停止，不注册登录自启。已确认进程在运行且写入主机心跳。Mac 睡眠期间仍无法采集。半天/过夜稳定性尚未验收，不能宣称黑屏故障已经修复。

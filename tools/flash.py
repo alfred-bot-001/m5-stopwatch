@@ -19,7 +19,7 @@ for port in comports():
             status = b''.join(conn.readline() for _ in range(3))
             if b'VIBE v=4 ' in status or b'VIBE v=3 ' in status:
                 conn.write(b'B')  # One-time migration from the old firmware.
-            elif any(f'VIBE v={v} '.encode() in status for v in (5, 6, 7, 8, 9)):
+            elif any(f'VIBE v={v} '.encode() in status for v in (5, 6, 7, 8, 9, 10)):
                 conn.write(b'\nVIBE/1 ARM-BOOT 288485439560\nVIBE/1 CONFIRM-BOOT 288485439560\n')
             else:
                 sys.exit('Unknown running firmware; refusing to send a boot command')

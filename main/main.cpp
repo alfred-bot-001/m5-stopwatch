@@ -3,9 +3,15 @@
 #include "vibe.h"
 #include "buttons.hpp"
 #include "gestures.hpp"
+#include "diagnostics.hpp"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#include "esp_attr.h"
+#include "soc/soc.h"
+#include "soc/gpio_reg.h"
+#include "soc/rtc_cntl_reg.h"
+#include "soc/system_reg.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include <atomic>
@@ -24,6 +30,13 @@ static std::atomic<unsigned> pmic_power{0};
 static std::atomic<unsigned> pmic_id{0},pmic_config2{0},pmic_func{0},pmic_drive{0},pmic_input{0};
 static std::atomic<unsigned> pmic_sleep{0},pmic_wdt{0},pmic_timer{0},pmic_seconds{0},pmic_source{0},pmic_wake{0},battery_mv{0},usb_mv{0};
 static std::atomic<bool> pmic_valid{false},power_reset_requested{false};
+static std::atomic<unsigned> pmic_events{0},pmic_event_ms{0},pmic_hold_ms{0},pmic_hold_max_ms{0};
+static std::atomic<unsigned> maintenance_intent{0};
+static portMUX_TYPE diagnostic_lock=portMUX_INITIALIZER_UNLOCKED;
+static RTC_NOINIT_ATTR volatile DiagnosticSnapshot retained_diagnostic;
+static DiagnosticSnapshot previous_diagnostic{};
+static bool previous_diagnostic_valid=false;
+static uint32_t boot_reset_raw=0,boot_strap_raw=0;
 static bool led_config_ok=false;
 static bool mic_ok=false;
 static std::atomic<bool> listen_requested{false},capture_enabled{false},mic_running{false};
@@ -32,6 +45,17 @@ static std::atomic<unsigned> cursor_steps{0},wheel_steps{0},gesture_drops{0};
 static QueueHandle_t reports,cursor_events,wheel_events;
 static SemaphoreHandle_t screen_lock;
 static M5Canvas *screen=nullptr;
+static void save_diagnostic(uint32_t now) {
+ portENTER_CRITICAL(&diagnostic_lock);
+ DiagnosticSnapshot value{0,0,now,
+  pmic_buttons.load()|(pmic_config.load()<<8)|(pmic_power.load()<<16)|(pmic_wake.load()<<24),
+  unsigned(pmic_valid.load())|(unsigned(connected.load())<<1)|(unsigned(yellow.load())<<2),
+  pmic_events.load(),pmic_event_ms.load(),pmic_hold_ms.load(),pmic_hold_max_ms.load(),maintenance_intent.load(),
+  boot_reset_raw,boot_strap_raw,vibe_usb_lifecycle(),0};
+ diagnostic_store(retained_diagnostic,value);
+ portEXIT_CRITICAL(&diagnostic_lock);
+}
+extern "C" void vibe_note_boot_intent(){maintenance_intent=1;save_diagnostic(esp_timer_get_time()/1000);}
 extern "C" uint8_t *vibe_snapshot(size_t *size) {
  if(!screen || !screen_lock)return nullptr;
  *size=360*360*2;auto *result=static_cast<uint8_t*>(malloc(*size));
@@ -102,10 +126,17 @@ extern "C" void vibe_pcm(int16_t *out,size_t n) {
 }
 extern "C" void vibe_status(char *out,size_t size) {
  unsigned c,d,u,q;portENTER_CRITICAL(&lock);c=captures;d=drops;u=underflows;q=count;portEXIT_CRITICAL(&lock);
- snprintf(out,size,"VIBE v=9 reset=%d uptime=%lld board=%d mic=%d usb=%d yellow=%d blue=%d rms=%.6f samples=%u queued=%u drops=%u underflows=%u errors=%u g0=%d presses=%u,%u pm_btn=%02x pm_cfg=%02x pm_pwr=%02x led_cfg_ok=%d pm_id=%08x pm_cfg2=%02x pm_func=%04x pm_drv=%02x pm_io=%02x pm_valid=%d listen=%d gestures=%u,%u gesture_drops=%u pm_sleep=%02x pm_wdt=%u pm_timer=%02x/%u pm_src=%02x pm_wake=%02x mv=%u,%u\n",
-  int(esp_reset_reason()),esp_timer_get_time()/1000,int(M5.getBoard()),int(mic_running.load()),int(connected.load()),int(yellow.load()),int(blue.load()),double(level.load()),c,q,d,u,errors.load(),gpio_get_level(GPIO_NUM_0),yellow_presses.load(),blue_presses.load(),pmic_buttons.load(),pmic_config.load(),pmic_power.load(),led_config_ok,pmic_id.load(),pmic_config2.load(),pmic_func.load(),pmic_drive.load(),pmic_input.load(),int(pmic_valid.load()),int(listen_requested.load()),cursor_steps.load(),wheel_steps.load(),gesture_drops.load(),pmic_sleep.load(),pmic_wdt.load(),pmic_timer.load(),pmic_seconds.load(),pmic_source.load(),pmic_wake.load(),battery_mv.load(),usb_mv.load());
+ snprintf(out,size,"VIBE v=10 reset=%d uptime=%lld board=%d mic=%d usb=%d yellow=%d blue=%d rms=%.6f samples=%u queued=%u drops=%u underflows=%u errors=%u g0=%d presses=%u,%u pm_btn=%02x pm_cfg=%02x pm_pwr=%02x led_cfg_ok=%d pm_id=%08x pm_cfg2=%02x pm_func=%04x pm_drv=%02x pm_io=%02x pm_valid=%d listen=%d gestures=%u,%u gesture_drops=%u pm_sleep=%02x pm_wdt=%u pm_timer=%02x/%u pm_src=%02x pm_wake=%02x mv=%u,%u pm_events=%u pm_evt_ms=%u pm_hold=%u pm_hold_max=%u intent=%u boot_raw=%08x boot_strap=%08x usb_ev=%08x usj_clk=%d prev=%u,%u,%u,%08x,%x,%u,%u,%u,%u,%08x,%08x,%08x\n",
+  int(esp_reset_reason()),esp_timer_get_time()/1000,int(M5.getBoard()),int(mic_running.load()),int(connected.load()),int(yellow.load()),int(blue.load()),double(level.load()),c,q,d,u,errors.load(),gpio_get_level(GPIO_NUM_0),yellow_presses.load(),blue_presses.load(),pmic_buttons.load(),pmic_config.load(),pmic_power.load(),led_config_ok,pmic_id.load(),pmic_config2.load(),pmic_func.load(),pmic_drive.load(),pmic_input.load(),int(pmic_valid.load()),int(listen_requested.load()),cursor_steps.load(),wheel_steps.load(),gesture_drops.load(),pmic_sleep.load(),pmic_wdt.load(),pmic_timer.load(),pmic_seconds.load(),pmic_source.load(),pmic_wake.load(),battery_mv.load(),usb_mv.load(),
+  pmic_events.load(),pmic_event_ms.load(),pmic_hold_ms.load(),pmic_hold_max_ms.load(),maintenance_intent.load(),unsigned(boot_reset_raw),unsigned(boot_strap_raw),unsigned(vibe_usb_lifecycle()),int(bool(REG_READ(SYSTEM_PERIP_CLK_EN1_REG)&SYSTEM_USB_DEVICE_CLK_EN)),
+  unsigned(previous_diagnostic_valid),unsigned(previous_diagnostic.uptime_ms),unsigned(previous_diagnostic.intent),unsigned(previous_diagnostic.pmic_state),unsigned(previous_diagnostic.flags),unsigned(previous_diagnostic.events),unsigned(previous_diagnostic.last_event_ms),unsigned(previous_diagnostic.held_ms),unsigned(previous_diagnostic.max_held_ms),unsigned(previous_diagnostic.reset_raw),unsigned(previous_diagnostic.strap_raw),unsigned(previous_diagnostic.usb_events));
 }
 extern "C" void app_main() {
+ boot_reset_raw=REG_READ(RTC_CNTL_RESET_STATE_REG);boot_strap_raw=REG_READ(GPIO_STRAP_REG);
+ previous_diagnostic=diagnostic_read(retained_diagnostic);
+ previous_diagnostic_valid=diagnostic_valid(previous_diagnostic);
+ if(!previous_diagnostic_valid)previous_diagnostic={};
+ save_diagnostic(esp_timer_get_time()/1000);
  reports=xQueueCreate(32,8);assert(reports);
  cursor_events=xQueueCreate(32,sizeof(int8_t));wheel_events=xQueueCreate(32,sizeof(int8_t));assert(cursor_events && wheel_events);
  auto cfg=M5.config();cfg.internal_spk=false;cfg.internal_imu=false;cfg.internal_rtc=false;
@@ -133,7 +164,7 @@ extern "C" void app_main() {
  screen_lock=xSemaphoreCreateMutex();screen=&canvas;
  vibe_usb_init();
  float envelope=0;
- uint32_t last_power_read=0,last_draw=0;unsigned attempted_session=0;Swipe swipe;
+ uint32_t last_power_read=0,last_draw=0;unsigned attempted_session=0;Swipe swipe;PowerButtonHistory power_buttons;
  for(;;){
   uint32_t now=esp_timer_get_time()/1000;
   if(mic_running.load() && (!capture_enabled.load() || !listen_requested.load())){
@@ -161,18 +192,25 @@ extern "C" void app_main() {
   // Explicit maintenance only: never reset the PMIC automatically at boot.
   // An ESP watchdog reset does not clear the PMIC's own download indicator.
   if(power_reset_requested.exchange(false)){
-   if(!pmic.writeRegister8(0x0c,0xa2))++errors;
+   maintenance_intent=2;save_diagnostic(esp_timer_get_time()/1000);
+   if(!pmic.writeRegister8(0x0c,0xa2)){++errors;maintenance_intent=0;save_diagnostic(esp_timer_get_time()/1000);}
   }
   if(now-last_power_read>=250){last_power_read=now;
    uint8_t buttons[3]={0},gpio[8]={0},system[7]={0},timer[5]={0},voltage[4]={0};
-   bool ok=pmic.readRegister(0x48,buttons,sizeof(buttons)) && pmic.readRegister(0x10,gpio,sizeof(gpio))
+   bool buttons_ok=pmic.readRegister(0x48,buttons,sizeof(buttons));
+   power_buttons.sample(buttons_ok,buttons[0],now);
+   if(buttons_ok){pmic_buttons=buttons[0];pmic_config=buttons[1];pmic_config2=buttons[2];}
+   pmic_events=power_buttons.events;pmic_event_ms=power_buttons.last_event_ms;
+   pmic_hold_ms=power_buttons.held_ms;pmic_hold_max_ms=power_buttons.max_held_ms;
+   bool ok=buttons_ok && pmic.readRegister(0x10,gpio,sizeof(gpio))
     && pmic.readRegister(0x04,system,sizeof(system)) && pmic.readRegister(0x38,timer,sizeof(timer)) && pmic.readRegister(0x22,voltage,sizeof(voltage));
-   if(ok){pmic_buttons=buttons[0];pmic_config=buttons[1];pmic_config2=buttons[2];
+   if(ok){
     pmic_func=(unsigned(gpio[7])<<8)|gpio[6];pmic_drive=gpio[3];pmic_input=gpio[2];pmic_power=system[2];
     pmic_source=system[0];pmic_wake=system[1];pmic_sleep=system[5];pmic_wdt=system[6];pmic_timer=timer[4];
     pmic_seconds=unsigned(timer[0])|(unsigned(timer[1])<<8)|(unsigned(timer[2])<<16)|(unsigned(timer[3])<<24);
     battery_mv=voltage[0]|(unsigned(voltage[1])<<8);usb_mv=voltage[2]|(unsigned(voltage[3])<<8);}
    pmic_valid=ok;
+   save_diagnostic(esp_timer_get_time()/1000);
   }
   float signal=std::fmin(1.f,std::fmax(0.f,(level.load()-0.006f)*18.f));
   envelope=std::fmax(signal,envelope*0.84f);

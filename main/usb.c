@@ -14,9 +14,11 @@
 #include "soc/soc.h"
 #include "soc/usb_serial_jtag_reg.h"
 #include "esp_private/periph_ctrl.h"
+#include "hal/usb_serial_jtag_ll.h"
 #include "esp_log.h"
 #include "freertos/queue.h"
 #include <stdarg.h>
+#include <stdatomic.h>
 
 // Share one IN endpoint: ESP32-S3 has five IN endpoints including EP0.
 enum { REPORT_KEYBOARD=1, REPORT_MOUSE=2 };
@@ -65,10 +67,15 @@ uint16_t tud_hid_get_report_cb(uint8_t instance,uint8_t id,hid_report_type_t typ
 void tud_hid_set_report_cb(uint8_t instance,uint8_t id,hid_report_type_t type,const uint8_t *buffer,uint16_t size) {
  (void)instance;(void)id;(void)type;(void)buffer;(void)size;
 }
-void tud_mount_cb(void){vibe_connected(true);}
-void tud_umount_cb(void){vibe_connected(false);}
-void tud_suspend_cb(bool wake){(void)wake;vibe_connected(false);}
-void tud_resume_cb(void){vibe_connected(true);}
+static _Atomic unsigned mounts,unmounts,suspends,resumes;
+uint32_t vibe_usb_lifecycle(void){
+ return (atomic_load(&mounts)&255) | ((atomic_load(&unmounts)&255)<<8)
+  | ((atomic_load(&suspends)&255)<<16) | ((atomic_load(&resumes)&255)<<24);
+}
+void tud_mount_cb(void){++mounts;vibe_connected(true);}
+void tud_umount_cb(void){++unmounts;vibe_connected(false);}
+void tud_suspend_cb(bool wake){(void)wake;++suspends;vibe_connected(false);}
+void tud_resume_cb(void){++resumes;vibe_connected(true);}
 
 static uint32_t rate=48000;
 static uint32_t usb_audio_frames=0;
@@ -132,8 +139,11 @@ static void control_task(void *arg) {
    maintenance_action_t action=maintenance_byte(&maintenance,c,pdTICKS_TO_MS(xTaskGetTickCount()));
    if(action==MAINT_POWER_RESET)vibe_request_power_reset();
    if(action==MAINT_BOOT) {
+    vibe_note_boot_intent();
     tud_disconnect();vTaskDelay(pdMS_TO_TICKS(50));
     periph_module_reset(PERIPH_USB_MODULE);periph_module_disable(PERIPH_USB_MODULE);
+    // Runtime USJ is disabled; explicitly restore it only for ROM maintenance.
+    PERIPH_RCC_ATOMIC(){usb_serial_jtag_ll_enable_bus_clock(true);}
     CLEAR_PERI_REG_MASK(RTC_CNTL_USB_CONF_REG,RTC_CNTL_SW_HW_USB_PHY_SEL|RTC_CNTL_SW_USB_PHY_SEL|RTC_CNTL_USB_PAD_ENABLE);
     CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG,USB_SERIAL_JTAG_PHY_SEL);
     SET_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG,USB_SERIAL_JTAG_USB_PAD_ENABLE);
@@ -147,8 +157,8 @@ static void control_task(void *arg) {
     snap_pos+=tud_cdc_write(snapshot+snap_pos,n);tud_cdc_write_flush();
     if(snap_pos==snap_size){free(snapshot);snapshot=NULL;}}
   }
-  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>768) {
-   last=now; char line[768]; vibe_status(line,sizeof(line));
+  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>1024) {
+   last=now; char line[1024]; vibe_status(line,sizeof(line));
    tud_cdc_write(line,strlen(line));tud_cdc_write_flush();
   }
   vTaskDelay(pdMS_TO_TICKS(1));
@@ -157,7 +167,15 @@ static void control_task(void *arg) {
 static void usb_task(void *arg){(void)arg;for(;;)tud_task();}
 void vibe_usb_init(void) {
  usb_phy_handle_t phy;usb_phy_config_t cfg={.controller=USB_PHY_CTRL_OTG,.target=USB_PHY_TARGET_INT,.otg_mode=USB_OTG_MODE_DEVICE};
- ESP_ERROR_CHECK(usb_new_phy(&cfg,&phy));assert(tusb_init());
+ ESP_ERROR_CHECK(usb_new_phy(&cfg,&phy));
+ // OTG now owns the internal PHY. Normalize even CPU-only reset paths, where
+ // IDF startup preserves peripheral clocks instead of applying USJ=n again.
+ PERIPH_RCC_ATOMIC(){
+  usb_serial_jtag_ll_enable_bus_clock(true);
+  usb_serial_jtag_ll_phy_enable_pad(false);
+  usb_serial_jtag_ll_enable_bus_clock(false);
+ }
+ assert(tusb_init());
  xTaskCreatePinnedToCore(usb_task,"usb",6144,NULL,8,NULL,0);
  xTaskCreatePinnedToCore(control_task,"controls",4096,NULL,4,NULL,0);
 }

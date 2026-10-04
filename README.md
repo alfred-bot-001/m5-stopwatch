@@ -1,6 +1,6 @@
 # StopWatch Vibe
 
-M5Stack StopWatch C152 的有线 USB 麦克风、双键键盘和触摸滚轮固件，面向 Mac 上的语音编程。当前已刷入 v9；按住采音和滑动操作继承 v8，v9 增加闲置黑屏调查所需的电源诊断。实测范围见 [验证记录](VALIDATION.md)。
+M5Stack StopWatch C152 的有线 USB 麦克风、双键键盘和触摸滚轮固件，面向 Mac 上的语音编程。当前固件 v10；按住采音和滑动操作继承 v8，v10 关闭闲置 USB 调试控制器并补充故障前状态记录。闲置黑屏的根因仍在调查。实测范围见 [验证记录](VALIDATION.md)。
 
 - 黄色左键：按住开启麦克风，同时保持右 Option（USB Right Alt）；松开关闭采集并释放按键。
 - 蓝色键：Enter。两键同时按是 Option+Enter；长按 Enter 的重复行为由电脑决定。
@@ -35,6 +35,9 @@ clang++ -std=c++17 tests/buttons.cpp -o /tmp/stopwatch-buttons-test
 /tmp/stopwatch-buttons-test
 clang++ -std=c++17 tests/gestures.cpp -o /tmp/stopwatch-gestures-test
 /tmp/stopwatch-gestures-test
+clang++ -std=c++17 -Wall -Wextra -Werror tests/diagnostics.cpp -o /tmp/stopwatch-diagnostics-test
+/tmp/stopwatch-diagnostics-test
+python3 -B tests/diagnose.py
 # 在 ESP-IDF Python 环境中（需要 pyelftools）：
 python tests/usb_descriptors.py build/stopwatch_vibe.elf
 ```
@@ -53,7 +56,15 @@ v8 中 `mic` 表示硬件采集是否运行，`listen` 表示当前是否请求�
 
 v9 的 `pm_sleep`、`pm_wdt`、`pm_timer` 分别记录 PMIC 休眠配置、看门狗倒计时、定时器配置/计数；`pm_src`/`pm_wake` 是电源和唤醒标志，`mv` 是电池/USB 电压（mV）。这些读数只说明采样当时状态，初始化也会清除部分 PMIC 设置，不能反推未记录的故障瞬间。
 
-需要排查闲置故障时，可用 `python tools/diagnose.py --seconds 86400 --output reports/idle-watch.jsonl` 记录最多 24 小时状态（需 pyserial）。该工具仅匹配本机原型，常态每 5 秒保存一行，并在关键状态变化时立即保存；不录音、不发送维护命令，不打开 ROM 下载串口，也不会自动恢复设备，以保留故障现场。Mac 睡眠/关机或进程结束时无法继续记录；正常使用固件不依赖此工具。刷机前应停止日志进程，避免两个串口读取者竞争诊断输出。
+需要排查闲置故障时，可用 `python tools/diagnose.py --seconds 86400 --output reports/idle-watch.jsonl` 记录最多 24 小时状态（需 pyserial）。该工具仅匹配本机原型，常态每 5 秒保存一行，并在关键状态变化时立即保存；不录音、不发送维护命令，不打开 ROM 下载串口，也不会自动恢复设备，以保留故障现场。v10 工具每 30 秒记录主机心跳，同时记录进程 PID、退出原因及休眠恢复的时间间隔。可传 `--deadline-unix`（Unix 秒）让监督进程重启后仍遵守同一个截止时间，避免不断延长 24 小时期限。Mac 睡眠/关机或进程结束时无法继续记录；正常使用固件不依赖此工具。刷机前应停止日志进程，避免两个串口读取者竞争诊断输出。
+
+v10 的 `pm_events` 累计保存读到的 PMIC 按键事件，`pm_evt_ms` 为最近事件的运行时间，`pm_hold`/`pm_hold_max` 为观察到的 bit0 当前/最长高电平毫秒数（按手册解释为按下，尚需核对本机实际按下/释放）。官方手册规定 `pm_btn` bit0 为 1 表示按下，bit7 为读取后清除的事件；一次读取间隔内的多次事件可能合并。累计记录避免短暂事件在每秒输出前被下一次读取覆盖，但不是独立的物理按键测量。
+
+`boot_raw`/`boot_strap` 在应用入口保存原始复位/启动引脚值；`usb_ev` 从低到高四个字节为 USB mount、unmount、suspend、resume 次数，各自按 256 回绕。`usj_clk=0` 表示闲置 USB Serial/JTAG 时钟关闭；正常 USB 音频、键盘和 CDC 使用独立的 OTG 控制器。受保护维护下载前会重新开启 USJ。关闭它是缩小排查范围，尚未证明能解决本次故障。
+
+`intent` 为 0（正常）、1（显式维护下载）或 2（显式 PMIC 重启）。RTC 内存以版本和校验保护最后一份状态；`prev` 依次输出有效标志、运行毫秒、维护意图、PMIC 打包状态、标志、按键事件数、最近事件时间、当前/最长按住时间、原始复位/启动引脚值、USB 事件计数。PMIC 打包状态低到高字节是 BTN/BTN_CFG1/PWR_CFG/WAKE_SRC；标志 bit0/1/2 是 PMIC 本次读取有效/USB 已连接/黄色键按住。RTC 仅在部分 ESP 复位中保持，掉电或完整硬件重置可能丢失；`prev=0,...` 不证明重启前没有异常。若已进入 ROM，应先保留现场，再依据该次 ELF 的 `retained_diagnostic` 符号读取；打开原生 ROM 串口本身可能改变复位原因，不能把读到的最后复位原因直接当作原始故障原因。
+
+本次排查可使用临时 launchd 任务监督日志进程，固定截止时间后正常退出；不写入开机自启目录，也不阻止 Mac 睡眠。刷机前先停止该任务：`launchctl bootout gui/$(id -u)/local.stopwatch.vibe.diagnostics`。本地原始诊断文件位于忽略的 `reports/`，不上传。
 
 ## 原固件恢复
 
