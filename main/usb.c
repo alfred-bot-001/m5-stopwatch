@@ -147,8 +147,8 @@ static void control_task(void *arg) {
     snap_pos+=tud_cdc_write(snapshot+snap_pos,n);tud_cdc_write_flush();
     if(snap_pos==snap_size){free(snapshot);snapshot=NULL;}}
   }
-  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>512) {
-   last=now; char line[512]; vibe_status(line,sizeof(line));
+  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>768) {
+   last=now; char line[768]; vibe_status(line,sizeof(line));
    tud_cdc_write(line,strlen(line));tud_cdc_write_flush();
   }
   vTaskDelay(pdMS_TO_TICKS(1));

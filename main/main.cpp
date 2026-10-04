@@ -22,6 +22,7 @@ static std::atomic<unsigned> errors{0};
 static std::atomic<unsigned> yellow_presses{0}, blue_presses{0},pmic_buttons{0},pmic_config{0};
 static std::atomic<unsigned> pmic_power{0};
 static std::atomic<unsigned> pmic_id{0},pmic_config2{0},pmic_func{0},pmic_drive{0},pmic_input{0};
+static std::atomic<unsigned> pmic_sleep{0},pmic_wdt{0},pmic_timer{0},pmic_seconds{0},pmic_source{0},pmic_wake{0},battery_mv{0},usb_mv{0};
 static std::atomic<bool> pmic_valid{false},power_reset_requested{false};
 static bool led_config_ok=false;
 static bool mic_ok=false;
@@ -101,8 +102,8 @@ extern "C" void vibe_pcm(int16_t *out,size_t n) {
 }
 extern "C" void vibe_status(char *out,size_t size) {
  unsigned c,d,u,q;portENTER_CRITICAL(&lock);c=captures;d=drops;u=underflows;q=count;portEXIT_CRITICAL(&lock);
- snprintf(out,size,"VIBE v=8 reset=%d uptime=%lld board=%d mic=%d usb=%d yellow=%d blue=%d rms=%.6f samples=%u queued=%u drops=%u underflows=%u errors=%u g0=%d presses=%u,%u pm_btn=%02x pm_cfg=%02x pm_pwr=%02x led_cfg_ok=%d pm_id=%08x pm_cfg2=%02x pm_func=%04x pm_drv=%02x pm_io=%02x pm_valid=%d listen=%d gestures=%u,%u gesture_drops=%u\n",
-  int(esp_reset_reason()),esp_timer_get_time()/1000,int(M5.getBoard()),int(mic_running.load()),int(connected.load()),int(yellow.load()),int(blue.load()),double(level.load()),c,q,d,u,errors.load(),gpio_get_level(GPIO_NUM_0),yellow_presses.load(),blue_presses.load(),pmic_buttons.load(),pmic_config.load(),pmic_power.load(),led_config_ok,pmic_id.load(),pmic_config2.load(),pmic_func.load(),pmic_drive.load(),pmic_input.load(),int(pmic_valid.load()),int(listen_requested.load()),cursor_steps.load(),wheel_steps.load(),gesture_drops.load());
+ snprintf(out,size,"VIBE v=9 reset=%d uptime=%lld board=%d mic=%d usb=%d yellow=%d blue=%d rms=%.6f samples=%u queued=%u drops=%u underflows=%u errors=%u g0=%d presses=%u,%u pm_btn=%02x pm_cfg=%02x pm_pwr=%02x led_cfg_ok=%d pm_id=%08x pm_cfg2=%02x pm_func=%04x pm_drv=%02x pm_io=%02x pm_valid=%d listen=%d gestures=%u,%u gesture_drops=%u pm_sleep=%02x pm_wdt=%u pm_timer=%02x/%u pm_src=%02x pm_wake=%02x mv=%u,%u\n",
+  int(esp_reset_reason()),esp_timer_get_time()/1000,int(M5.getBoard()),int(mic_running.load()),int(connected.load()),int(yellow.load()),int(blue.load()),double(level.load()),c,q,d,u,errors.load(),gpio_get_level(GPIO_NUM_0),yellow_presses.load(),blue_presses.load(),pmic_buttons.load(),pmic_config.load(),pmic_power.load(),led_config_ok,pmic_id.load(),pmic_config2.load(),pmic_func.load(),pmic_drive.load(),pmic_input.load(),int(pmic_valid.load()),int(listen_requested.load()),cursor_steps.load(),wheel_steps.load(),gesture_drops.load(),pmic_sleep.load(),pmic_wdt.load(),pmic_timer.load(),pmic_seconds.load(),pmic_source.load(),pmic_wake.load(),battery_mv.load(),usb_mv.load());
 }
 extern "C" void app_main() {
  reports=xQueueCreate(32,8);assert(reports);
@@ -163,10 +164,14 @@ extern "C" void app_main() {
    if(!pmic.writeRegister8(0x0c,0xa2))++errors;
   }
   if(now-last_power_read>=250){last_power_read=now;
-   uint8_t buttons[3]={0},gpio[8]={0},power=0;
-   bool ok=pmic.readRegister(0x48,buttons,sizeof(buttons)) && pmic.readRegister(0x10,gpio,sizeof(gpio)) && pmic.readRegister(0x06,&power,1);
+   uint8_t buttons[3]={0},gpio[8]={0},system[7]={0},timer[5]={0},voltage[4]={0};
+   bool ok=pmic.readRegister(0x48,buttons,sizeof(buttons)) && pmic.readRegister(0x10,gpio,sizeof(gpio))
+    && pmic.readRegister(0x04,system,sizeof(system)) && pmic.readRegister(0x38,timer,sizeof(timer)) && pmic.readRegister(0x22,voltage,sizeof(voltage));
    if(ok){pmic_buttons=buttons[0];pmic_config=buttons[1];pmic_config2=buttons[2];
-    pmic_func=(unsigned(gpio[7])<<8)|gpio[6];pmic_drive=gpio[3];pmic_input=gpio[2];pmic_power=power;}
+    pmic_func=(unsigned(gpio[7])<<8)|gpio[6];pmic_drive=gpio[3];pmic_input=gpio[2];pmic_power=system[2];
+    pmic_source=system[0];pmic_wake=system[1];pmic_sleep=system[5];pmic_wdt=system[6];pmic_timer=timer[4];
+    pmic_seconds=unsigned(timer[0])|(unsigned(timer[1])<<8)|(unsigned(timer[2])<<16)|(unsigned(timer[3])<<24);
+    battery_mv=voltage[0]|(unsigned(voltage[1])<<8);usb_mv=voltage[2]|(unsigned(voltage[3])<<8);}
    pmic_valid=ok;
   }
   float signal=std::fmin(1.f,std::fmax(0.f,(level.load()-0.006f)*18.f));

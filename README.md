@@ -1,6 +1,6 @@
 # StopWatch Vibe
 
-M5Stack StopWatch C152 的有线 USB 麦克风、双键键盘和触摸滚轮固件，面向 Mac 上的语音编程。当前已刷入 v8，增加按住采音和滑动操作；实测范围见 [验证记录](VALIDATION.md)。
+M5Stack StopWatch C152 的有线 USB 麦克风、双键键盘和触摸滚轮固件，面向 Mac 上的语音编程。当前已刷入 v9；按住采音和滑动操作继承 v8，v9 增加闲置黑屏调查所需的电源诊断。实测范围见 [验证记录](VALIDATION.md)。
 
 - 黄色左键：按住开启麦克风，同时保持右 Option（USB Right Alt）；松开关闭采集并释放按键。
 - 蓝色键：Enter。两键同时按是 Option+Enter；长按 Enter 的重复行为由电脑决定。
@@ -48,6 +48,12 @@ python tests/usb_descriptors.py build/stopwatch_vibe.elf
 v8 中 `mic` 表示硬件采集是否运行，`listen` 表示当前是否请求按住采音；闲置时两者应为 0，`samples` 应停止增长。`gestures` 是累计发送到队列的水平光标步数/滚轮步数，`gesture_drops` 是队列满时丢弃的事件数，不能将其当作电脑已经处理手势的证明。`drops` 包含按住黄色键但电脑未打开麦克风时主动丢弃的旧音频，不等同于录音丢帧；静音期间不增加 `underflows`。
 
 其他 StopWatch 请先使用 esptool 完整备份自己的 16 MiB Flash，再按构建输出中的地址刷写 bootloader、partition table 和 app，并使用 `--after watchdog-reset`。当前 USB 序列号是这台个人原型的固定编号，多台同时使用时应改为各自唯一编号。
+
+## 闲置故障记录
+
+v9 的 `pm_sleep`、`pm_wdt`、`pm_timer` 分别记录 PMIC 休眠配置、看门狗倒计时、定时器配置/计数；`pm_src`/`pm_wake` 是电源和唤醒标志，`mv` 是电池/USB 电压（mV）。这些读数只说明采样当时状态，初始化也会清除部分 PMIC 设置，不能反推未记录的故障瞬间。
+
+需要排查闲置故障时，可用 `python tools/diagnose.py --seconds 86400 --output reports/idle-watch.jsonl` 记录最多 24 小时状态（需 pyserial）。该工具仅匹配本机原型，常态每 5 秒保存一行，并在关键状态变化时立即保存；不录音、不发送维护命令，不打开 ROM 下载串口，也不会自动恢复设备，以保留故障现场。Mac 睡眠/关机或进程结束时无法继续记录；正常使用固件不依赖此工具。刷机前应停止日志进程，避免两个串口读取者竞争诊断输出。
 
 ## 原固件恢复
 
