@@ -142,7 +142,7 @@ extern "C" void vibe_status(char *out,size_t size) {
   pmic_events.load(),pmic_event_ms.load(),pmic_hold_ms.load(),pmic_hold_max_ms.load(),maintenance_intent.load(),unsigned(boot_reset_raw),unsigned(boot_strap_raw),unsigned(vibe_usb_lifecycle()),int(bool(REG_READ(SYSTEM_PERIP_CLK_EN1_REG)&SYSTEM_USB_DEVICE_CLK_EN)),
   unsigned(previous_diagnostic_valid),unsigned(previous_diagnostic.uptime_ms),unsigned(previous_diagnostic.intent),unsigned(previous_diagnostic.pmic_state),unsigned(previous_diagnostic.flags),unsigned(previous_diagnostic.events),unsigned(previous_diagnostic.last_event_ms),unsigned(previous_diagnostic.held_ms),unsigned(previous_diagnostic.max_held_ms),unsigned(previous_diagnostic.reset_raw),unsigned(previous_diagnostic.strap_raw),unsigned(previous_diagnostic.usb_events));
  size_t used=strlen(out);if(used && out[used-1]=='\n')out[--used]=0;
- char radio[512];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),radio);
+ char radio[768];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),radio);
 }
 static void draw_microphone(M5Canvas &canvas,uint16_t color,int radius,bool muted){
  canvas.fillSprite(TFT_BLACK);

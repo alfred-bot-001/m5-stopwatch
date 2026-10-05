@@ -25,6 +25,8 @@
 - 重新连接后须先松开按键，防止旧的 Option/Enter 重放。无线接收器在线时优先走接收器，StopWatch 自身 USB 键鼠/音频输出静音或释放状态；接收器离线后，原有有线方式仍可使用，切换也要求松开按键。
 - USB 设备名为 `StopWatch Receiver C480`，包含标准 USB 麦克风、键盘/鼠标及诊断串口。语音输入应用需选择 `StopWatch Wireless Microphone`。键鼠输入不需要电脑安装专用程序。
 
+排查 `SEARCHING` 时，先分别看两条连接：C480 的 `host=1` 表示电脑 USB 已连接，`radio=1` 表示与 StopWatch 的控制会话有效。`ap_stations=1` 只证明有 Wi-Fi 站点关联，不等于控制会话已建立。StopWatch 的 `associated`、`wifi_up`、`wifi_reason`、`wifi_attempts`、`wifi_connect_err`、`wifi_timeouts` 和 `tcp_errno` 用于区分无线关联、静态 IP 与控制连接阶段；断线原因和错误计数可能保留上一次失败，需结合当前状态及计数变化查看。
+
 无线时开启 Wi-Fi，续航、最大距离和抗干扰能力需实测，不能沿用有线待机的功耗估计。原始音频不压缩，避免编解码损耗；无线延迟和丢包仍可能影响语音。
 
 ## 构建和恢复

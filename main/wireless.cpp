@@ -1,5 +1,6 @@
 #include "wireless.h"
 #include "wire_protocol.hpp"
+#include "station_reconnect.hpp"
 #include "pairing.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
@@ -38,6 +39,16 @@ static std::atomic<esp_err_t> radio_error{ESP_OK};
 static std::atomic<int> radio_errno{0};
 static std::atomic<uint32_t> init_stack_min{UINT32_MAX};
 static std::atomic<const char*> radio_stage{"off"};
+static esp_netif_t *radio_netif=nullptr;
+#ifndef VIBE_RECEIVER
+static std::atomic<uint32_t> wifi_disconnects{0},wifi_attempts{0},wifi_timeouts{0},tcp_attempts{0};
+static std::atomic<int> wifi_reason{0},wifi_connect_error{0},tcp_error{0};
+// Only the control worker calls the driver. The event loop publishes its latest
+// transition under guard; wifi_up is updated in the same critical section.
+static StationEvent station_event=StationEvent::none;
+static uint32_t station_event_sequence=0;
+static StationEventGate station_event_gate;
+#endif
 static esp_err_t radio_fail(const char *stage,esp_err_t error,int detail=0){
  esp_err_t expected=ESP_OK;
  if(radio_error.compare_exchange_strong(expected,error)){
@@ -86,11 +97,14 @@ static bool connect_peer(int fd,const sockaddr_in &remote){
  if(result<0 && errno!=EINPROGRESS)return false;
  if(result<0){
   fd_set write_set;FD_ZERO(&write_set);FD_SET(fd,&write_set);timeval timeout{0,150000};
-  if(select(fd+1,nullptr,&write_set,nullptr,&timeout)<=0)return false;
+  int selected=select(fd+1,nullptr,&write_set,nullptr,&timeout);
+  if(selected<=0){if(selected==0)errno=ETIMEDOUT;return false;}
   int error=0;socklen_t size=sizeof(error);
-  if(getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&size)<0 || error)return false;
+  if(getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&size)<0)return false;
+  if(error){errno=error;return false;}
  }
- return radio_running.load() && wifi_up.load() && fcntl(fd,F_SETFL,flags)==0;
+ if(!radio_running.load() || !wifi_up.load()){errno=ENETDOWN;return false;}
+ return fcntl(fd,F_SETFL,flags)==0;
 }
 #endif
 static bool transfer(int fd,void *data,size_t size,bool writing){
@@ -99,17 +113,74 @@ static bool transfer(int fd,void *data,size_t size,bool writing){
  return true;
 }
 static sockaddr_in address(int port,const char *ip){sockaddr_in a{};a.sin_family=AF_INET;a.sin_port=htons(port);a.sin_addr.s_addr=inet_addr(ip);return a;}
-static void wifi_event(void*,esp_event_base_t base,int32_t id,void*){
+static void wifi_event(void*,esp_event_base_t base,int32_t id,void *data){
 #ifndef VIBE_RECEIVER
  if(radio_error.load()!=ESP_OK)return;
- if(base==WIFI_EVENT && id==WIFI_EVENT_STA_START)esp_wifi_connect();
- if(base==WIFI_EVENT && id==WIFI_EVENT_STA_DISCONNECTED){wifi_up=false;peer_usb=false;esp_wifi_connect();}
- if(base==IP_EVENT && id==IP_EVENT_STA_GOT_IP)wifi_up=true;
+ StationEvent event=StationEvent::none;
+ if(base==WIFI_EVENT && id==WIFI_EVENT_STA_START)event=StationEvent::started;
+ if(base==WIFI_EVENT && id==WIFI_EVENT_STA_STOP)event=StationEvent::stopped;
+ if(base==WIFI_EVENT && id==WIFI_EVENT_STA_CONNECTED)event=StationEvent::associated;
+ if(base==WIFI_EVENT && id==WIFI_EVENT_STA_DISCONNECTED){
+  ++wifi_disconnects;if(data)wifi_reason=static_cast<wifi_event_sta_disconnected_t*>(data)->reason;
+  event=StationEvent::disconnected;
+ }
+ bool matching_netif=true;
+ if(base==IP_EVENT && id==IP_EVENT_STA_GOT_IP){
+  event=StationEvent::got_ip;
+  // radio_netif is published before handlers are registered or Wi-Fi starts.
+  matching_netif=data && radio_netif && static_cast<ip_event_got_ip_t*>(data)->esp_netif==radio_netif;
+ }
+ if(event!=StationEvent::none){
+  portENTER_CRITICAL(&guard);
+  if(!station_event_gate.accept(event,matching_netif)){portEXIT_CRITICAL(&guard);return;}
+  if(event==StationEvent::got_ip)wifi_up=true;
+  if(event==StationEvent::started || event==StationEvent::disconnected || event==StationEvent::stopped){wifi_up=false;peer_usb=false;}
+  station_event=event;++station_event_sequence;
+  portEXIT_CRITICAL(&guard);
+ }
 #else
- (void)base;(void)id;
+ (void)base;(void)id;(void)data;
 #endif
 }
 #ifndef VIBE_RECEIVER
+static void service_station(StationReconnect &policy,uint32_t &observed_sequence){
+ StationEvent event;uint32_t sequence;
+ portENTER_CRITICAL(&guard);event=station_event;sequence=station_event_sequence;portEXIT_CRITICAL(&guard);
+ uint32_t now=now_ms();
+ if(sequence!=observed_sequence){observed_sequence=sequence;policy.event(event,now);}
+ auto action=policy.poll(now,wifi_up.load());
+ if(action==StationReconnect::Action::connect){
+  portENTER_CRITICAL(&guard);bool unchanged=sequence==station_event_sequence;portEXIT_CRITICAL(&guard);
+  if(!unchanged || wifi_up.load())return;
+  ++wifi_attempts;esp_err_t error=esp_wifi_connect();wifi_connect_error=error;
+  // STATE means the driver is already scanning/connecting; leave it time to
+  // finish instead of repeatedly submitting a competing request.
+  policy.connect_result(error==ESP_OK || error==ESP_ERR_WIFI_STATE,now_ms());
+ }else if(action==StationReconnect::Action::timeout){
+  // A default GOT_IP post can fail if the event queue is full. Reconcile with
+  // actual association/netif state before cancelling a stalled attempt.
+  wifi_ap_record_t ap{};esp_netif_ip_info_t ip{};esp_netif_dhcp_status_t dhcp{};
+  bool associated=esp_wifi_sta_get_ap_info(&ap)==ESP_OK;
+  bool ready=associated && radio_netif
+   && esp_netif_is_netif_up(radio_netif)
+   && esp_netif_get_ip_info(radio_netif,&ip)==ESP_OK
+   && esp_netif_dhcpc_get_status(radio_netif,&dhcp)==ESP_OK
+   && dhcp==ESP_NETIF_DHCP_STOPPED && ip.ip.addr==inet_addr("192.168.7.2");
+  portENTER_CRITICAL(&guard);
+  bool unchanged=sequence==station_event_sequence;
+  if(unchanged && ready)wifi_up=true;
+  portEXIT_CRITICAL(&guard);
+  if(!unchanged)return; // Process a newer driver event on the next worker turn.
+  if(ready){policy.event(StationEvent::got_ip,now_ms());return;}
+  // Association is real even if IP diagnostics failed. Do not disrupt that
+  // link; keep waiting for/default-netif diagnostics instead of reconnecting.
+  if(associated){policy.event(StationEvent::associated,now_ms());return;}
+  ++wifi_timeouts;
+  // Cancel only after 15 seconds without completion. Never stop/start Wi-Fi:
+  // STA_STOP would reset the static-IP netif to DHCP_INIT.
+  esp_wifi_disconnect();
+ }
+}
 static void publish_keys(const uint8_t *keys,int8_t wheel){
  Control p;
  portENTER_CRITICAL(&guard);if(keys)memcpy(state.keys,keys,8);p=state;portEXIT_CRITICAL(&guard);
@@ -145,13 +216,19 @@ static void sender_audio(void*){
  close(fd);
 }
 static void sender_control(void*){
+ StationReconnect reconnect;uint32_t observed_sequence=0;
+ // The checked startup completed even if its STA_START event was lost.
+ reconnect.event(StationEvent::started,now_ms());
  while(radio_running.load()){
   peer_usb=false;token=0;xQueueReset(controls);xQueueReset(audios);queue_fault=false;
+  service_station(reconnect,observed_sequence);
   if(!wifi_up){vTaskDelay(pdMS_TO_TICKS(100));continue;}
   int fd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(fd<0){vTaskDelay(pdMS_TO_TICKS(100));continue;}
   if(!options(fd)){int error=errno;close(fd);radio_fail("control_options",ESP_FAIL,error);break;}
   auto remote=address(control_port,"192.168.7.1");
-  if(!connect_peer(fd,remote)){close(fd);vTaskDelay(pdMS_TO_TICKS(250));continue;}
+  ++tcp_attempts;
+  if(!connect_peer(fd,remote)){tcp_error=errno;close(fd);vTaskDelay(pdMS_TO_TICKS(250));continue;}
+  tcp_error=0;
   Ack ack;
   if(!transfer(fd,&ack,sizeof(ack),false)||ack.magic_value!=magic||!ack.token){close(fd);continue;}
   if(!radio_running.load()){close(fd);break;}
@@ -296,8 +373,22 @@ extern "C" void wireless_status(char *out,size_t size){
  Control p;unsigned lost,over,under,buffered;
  portENTER_CRITICAL(&guard);p=state;lost=audio_buffer.lost;over=audio_buffer.overflow;under=audio_buffer.underflow;buffered=audio_buffer.count;portEXIT_CRITICAL(&guard);
  wireless_view_t view;wireless_view(&view);
- snprintf(out,size,"radio=%d host=%d sessions=%u audio_tx=%u audio_rx=%u tx_err=%u lost=%u over=%u under=%u buffered=%u remote_mv=%u remote_level=%u remote_listen=%u radio_init=%d radio_err=0x%x radio_stage=%s radio_errno=%d radio_stack_min=%u",
-  int(link_alive()),int(view.host),unsigned(connections.load()),unsigned(tx_audio_count.load()),unsigned(rx_audio_count.load()),unsigned(tx_errors.load()),lost,over,under,buffered,unsigned(p.battery_mv),unsigned(p.level),unsigned(p.listening),int(view.initialized),unsigned(view.error),view.stage,radio_errno.load(),unsigned(init_stack_min.load()==UINT32_MAX?0:init_stack_min.load()));
+ char wifi[384]{};
+ if(radio_running.load()){
+#ifdef VIBE_RECEIVER
+  wifi_sta_list_t stations{};esp_err_t error=esp_wifi_ap_get_sta_list(&stations);
+  snprintf(wifi,sizeof(wifi)," ap_stations=%d wifi_query=0x%x",error==ESP_OK?int(stations.num):-1,unsigned(error));
+#else
+  wifi_ap_record_t ap{};esp_err_t error=esp_wifi_sta_get_ap_info(&ap);
+  esp_netif_ip_info_t ip{};esp_netif_get_ip_info(radio_netif,&ip);
+  esp_netif_dhcp_status_t dhcp{};esp_netif_dhcpc_get_status(radio_netif,&dhcp);
+  snprintf(wifi,sizeof(wifi)," wifi_up=%d associated=%d rssi=%d wifi_query=0x%x net_up=%d ip=%08lx dhcp=%d wifi_attempts=%u wifi_disc=%u wifi_reason=%d wifi_connect_err=0x%x wifi_timeouts=%u tcp_attempts=%u tcp_errno=%d",
+   int(wifi_up.load()),int(error==ESP_OK),error==ESP_OK?int(ap.rssi):0,unsigned(error),int(esp_netif_is_netif_up(radio_netif)),ip.ip.addr,int(dhcp),
+   unsigned(wifi_attempts.load()),unsigned(wifi_disconnects.load()),wifi_reason.load(),unsigned(wifi_connect_error.load()),unsigned(wifi_timeouts.load()),unsigned(tcp_attempts.load()),tcp_error.load());
+#endif
+ }
+ snprintf(out,size,"radio=%d host=%d sessions=%u audio_tx=%u audio_rx=%u tx_err=%u lost=%u over=%u under=%u buffered=%u remote_mv=%u remote_level=%u remote_listen=%u radio_init=%d radio_err=0x%x radio_stage=%s radio_errno=%d radio_stack_min=%u%s",
+  int(link_alive()),int(view.host),unsigned(connections.load()),unsigned(tx_audio_count.load()),unsigned(rx_audio_count.load()),unsigned(tx_errors.load()),lost,over,under,buffered,unsigned(p.battery_mv),unsigned(p.level),unsigned(p.listening),int(view.initialized),unsigned(view.error),view.stage,radio_errno.load(),unsigned(init_stack_min.load()==UINT32_MAX?0:init_stack_min.load()),wifi);
 }
 // Workers cannot see partially constructed queues or network state.
 static bool wait_for_radio(){
@@ -381,6 +472,7 @@ static esp_err_t initialize_radio(){
  esp_netif_config_t netif_config=ESP_NETIF_DEFAULT_WIFI_STA();
 #endif
  netif=esp_netif_new(&netif_config);if(!netif)return fail(ESP_ERR_NO_MEM);
+ radio_netif=netif;
  // Mark before attach: IDF records the netif even when driver allocation fails.
  driver_attached=true;
 #ifdef VIBE_RECEIVER

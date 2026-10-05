@@ -13,6 +13,15 @@ M5Stack StopWatch C152 的 USB 麦克风、双键键盘和触摸滚轮固件，�
 
 macOS 将有线 StopWatch 识别为 `StopWatch Vibe`，将接收器识别为 `StopWatch Receiver C480`，使用系统自带的 USB 音频、键盘和鼠标驱动。音频输入列表中的名称分别是 `StopWatch Vibe Microphone` 和 `StopWatch Wireless Microphone`。键盘与鼠标共用 HID 接口，以 Report ID 1/2 区分，适配 ESP32-S3 的输入端点数量限制。首次使用请在系统或目标应用中选择对应输入设备；USB 固件无法强制另一台电脑切换默认麦克风。语音转文字和快捷键触发行为由电脑上的应用负责，固件不做识别、不保存录音。v11 只在两端的专用无线网络传送音频和控制信息，不连接互联网。
 
+## 有线与无线使用
+
+- 有线：StopWatch 用数据线连接电脑，直接作为 USB 键鼠和麦克风使用。
+- 无线：C480 用数据线连接电脑，StopWatch 自动连接 C480 建立的 `StopWatch-C480` 专用 Wi-Fi，再由 C480 输出 USB 键鼠和麦克风。StopWatch 可以用电池供电；电脑无需加入该 Wi-Fi，也无需家用路由器。
+- 两条通路自动选择。StopWatch 显示 `WIRELESS` 时优先走接收器；显示 `USB / SEARCHING` 时仍在寻找接收器，此时自身 USB 有线功能可用。切换后先松开两键，再开始操作。
+- C480 的「USB连接」与「StopWatch连接」是两个独立状态。亮屏只说明有供电；「等待 USB」说明尚未完成主机 USB 连接，「等待 StopWatch」说明尚无有效无线控制连接。
+
+无线重连在工作任务中执行：连接请求立即失败时按250ms至4s退避重试；连接进行中等待最多15秒再核对实际关联和静态IP，避免打断健康链路。诊断包含关联、断线原因、重试次数及 TCP 错误；接收器报告已关联站点数。配对文件保持不变，不通过擦除 NVS 或反复重启整台设备恢复连接。
+
 ## 构建与刷写
 
 使用 ESP-IDF 5.5.0、Xtensa 14.2.0、TinyUSB 0.18.0~2。M5Unified 和 M5GFX 以固定提交的 Git 子模块保存；TinyUSB 为供应商组件源码，保留原始许可证。详见 [依赖记录](THIRD_PARTY.md)。
@@ -38,6 +47,8 @@ clang++ -std=c++17 tests/gestures.cpp -o /tmp/stopwatch-gestures-test
 /tmp/stopwatch-gestures-test
 clang++ -std=c++17 -Wall -Wextra -Werror tests/diagnostics.cpp -o /tmp/stopwatch-diagnostics-test
 /tmp/stopwatch-diagnostics-test
+clang++ -std=c++17 -Wall -Wextra -Werror tests/station_reconnect.cpp -o /tmp/stopwatch-reconnect-test
+/tmp/stopwatch-reconnect-test
 python3 -B tests/diagnose.py
 # 在 ESP-IDF Python 环境中（需要 pyelftools）：
 python tests/usb_descriptors.py build/stopwatch_vibe.elf
