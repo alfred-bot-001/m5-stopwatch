@@ -3,6 +3,11 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#ifdef VIBE_RECEIVER
+#define VIBE_DEVICE_ID "9C139E8AC480"
+#else
+#define VIBE_DEVICE_ID "288485439560"
+#endif
 typedef enum {MAINT_NONE,MAINT_BOOT,MAINT_POWER_RESET} maintenance_action_t;
 typedef struct {char line[64];size_t length;bool discard;maintenance_action_t armed;uint32_t last,armed_at;} maintenance_t;
 static inline maintenance_action_t maintenance_byte(maintenance_t *p,char c,uint32_t now) {
@@ -11,12 +16,12 @@ static inline maintenance_action_t maintenance_byte(maintenance_t *p,char c,uint
  if(c=='\n'){
   maintenance_action_t action=MAINT_NONE;p->line[p->length]=0;
   if(!p->discard){
-   if(!strcmp(p->line,"VIBE/1 ARM-BOOT 288485439560")){p->armed=MAINT_BOOT;p->armed_at=now;}
-   else if(!strcmp(p->line,"VIBE/1 ARM-RESET 288485439560")){p->armed=MAINT_POWER_RESET;p->armed_at=now;}
+   if(!strcmp(p->line,"VIBE/1 ARM-BOOT " VIBE_DEVICE_ID)){p->armed=MAINT_BOOT;p->armed_at=now;}
+   else if(!strcmp(p->line,"VIBE/1 ARM-RESET " VIBE_DEVICE_ID)){p->armed=MAINT_POWER_RESET;p->armed_at=now;}
    else {
     if((uint32_t)(now-p->armed_at)<=2000){
-     if(p->armed==MAINT_BOOT && !strcmp(p->line,"VIBE/1 CONFIRM-BOOT 288485439560"))action=MAINT_BOOT;
-     if(p->armed==MAINT_POWER_RESET && !strcmp(p->line,"VIBE/1 CONFIRM-RESET 288485439560"))action=MAINT_POWER_RESET;
+     if(p->armed==MAINT_BOOT && !strcmp(p->line,"VIBE/1 CONFIRM-BOOT " VIBE_DEVICE_ID))action=MAINT_BOOT;
+     if(p->armed==MAINT_POWER_RESET && !strcmp(p->line,"VIBE/1 CONFIRM-RESET " VIBE_DEVICE_ID))action=MAINT_POWER_RESET;
     }
     p->armed=MAINT_NONE;
    }

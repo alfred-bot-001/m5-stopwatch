@@ -1,0 +1,4 @@
+idf_component_register(SRCS "receiver.cpp" "../../main/usb.c" "../../main/wireless.cpp" INCLUDE_DIRS "." "../../main" "../../private" REQUIRES M5GFX tinyusb nvs_flash esp_timer driver esp_lcd usb esp_wifi esp_netif lwip)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE VIBE_RECEIVER=1)
+idf_component_get_property(tusb_lib tinyusb COMPONENT_LIB)
+target_include_directories(${tusb_lib} PUBLIC "${CMAKE_CURRENT_LIST_DIR}/../../main")

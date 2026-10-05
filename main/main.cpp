@@ -1,6 +1,7 @@
 #include <M5Unified.h>
 #include <utility/M5IOE1_Class.hpp>
 #include "vibe.h"
+#include "wireless.h"
 #include "buttons.hpp"
 #include "gestures.hpp"
 #include "diagnostics.hpp"
@@ -39,6 +40,8 @@ static bool previous_diagnostic_valid=false;
 static uint32_t boot_reset_raw=0,boot_strap_raw=0;
 static bool led_config_ok=false;
 static bool mic_ok=false;
+static bool wireless_safe_boot=false;
+static TaskHandle_t main_task=nullptr;
 static std::atomic<bool> listen_requested{false},capture_enabled{false},mic_running{false};
 static std::atomic<unsigned> listen_session{0};
 static std::atomic<unsigned> cursor_steps{0},wheel_steps{0},gesture_drops{0};
@@ -69,7 +72,12 @@ extern "C" void vibe_service() {
  static CursorPulse cursor;
  static uint8_t previous[8]={0};
  uint32_t now=esp_timer_get_time()/1000;
- bool active=connected.load();
+ static int previous_transport=0;
+ int transport=wireless_ready()?2:(connected.load()?1:0);
+ bool active=transport!=0;
+ // A route change is a disconnect: release locally and require physical release.
+ if(transport!=previous_transport){uint8_t zero[8]{};keyboard.update(keyboard.a.raw,keyboard.b.raw,false,now,zero);xQueueReset(reports);xQueueSend(reports,zero,0);xQueueReset(cursor_events);xQueueReset(wheel_events);cursor.reset();memset(previous,0,8);wireless_keyboard(zero);previous_transport=transport;}
+
  uint8_t report[8];
  bool old_a=keyboard.a.stable,old_b=keyboard.b.stable;
  bool edge=keyboard.update(!gpio_get_level(GPIO_NUM_2),!gpio_get_level(GPIO_NUM_1),active,now,report);
@@ -85,6 +93,7 @@ extern "C" void vibe_service() {
  if(edge){xQueueReset(reports);xQueueReset(cursor_events);xQueueReset(wheel_events);cursor.reset();memset(previous,0,8);
   if(active)xQueueSend(reports,previous,0);
  }
+ wireless_state(listen,listen_session.load(),battery_mv.load(),level.load());
  if(!active)return;
  cursor.update(now);
  int8_t direction;
@@ -92,11 +101,12 @@ extern "C" void vibe_service() {
  report[3]=cursor.key;
  if(memcmp(previous,report,8)) {
   if(xQueueSend(reports,report,0)!=pdTRUE){xQueueReset(reports);xQueueSend(reports,report,0);}
+  wireless_keyboard(report);
   memcpy(previous,report,8);
  }
 }
-extern "C" bool vibe_report(uint8_t report[8]){return xQueueReceive(reports,report,0)==pdTRUE;}
-extern "C" bool vibe_wheel(int8_t *wheel){return xQueueReceive(wheel_events,wheel,0)==pdTRUE;}
+extern "C" bool vibe_report(uint8_t report[8]){bool got=xQueueReceive(reports,report,0)==pdTRUE;if(got && wireless_ready())memset(report,0,8);return got;}
+extern "C" bool vibe_wheel(int8_t *wheel){bool got=xQueueReceive(wheel_events,wheel,0)==pdTRUE;return got && !wireless_ready();}
 static void captured(void*,void* data,size_t n) {
  auto *pcm=static_cast<int16_t*>(data);double sum=0;
  for(size_t i=0;i<n;i++)sum+=double(pcm[i])*pcm[i];
@@ -109,11 +119,12 @@ static void captured(void*,void* data,size_t n) {
  }
  captures+=n;}
  portEXIT_CRITICAL(&lock);
+ if(enabled)wireless_audio(pcm,n);
  if(enabled && !M5.Mic.record(pcm,n) && capture_enabled.load() && listen_requested.load())++errors;
 }
 extern "C" void vibe_pcm(int16_t *out,size_t n) {
  portENTER_CRITICAL(&lock);
- if(!capture_enabled.load() || !listen_requested.load()){
+ if(wireless_ready() || !capture_enabled.load() || !listen_requested.load()){
   memset(out,0,n*sizeof(*out));portEXIT_CRITICAL(&lock);return;
  }
  // Keep a bounded, recent window when the host begins consuming audio.
@@ -126,12 +137,26 @@ extern "C" void vibe_pcm(int16_t *out,size_t n) {
 }
 extern "C" void vibe_status(char *out,size_t size) {
  unsigned c,d,u,q;portENTER_CRITICAL(&lock);c=captures;d=drops;u=underflows;q=count;portEXIT_CRITICAL(&lock);
- snprintf(out,size,"VIBE v=10 reset=%d uptime=%lld board=%d mic=%d usb=%d yellow=%d blue=%d rms=%.6f samples=%u queued=%u drops=%u underflows=%u errors=%u g0=%d presses=%u,%u pm_btn=%02x pm_cfg=%02x pm_pwr=%02x led_cfg_ok=%d pm_id=%08x pm_cfg2=%02x pm_func=%04x pm_drv=%02x pm_io=%02x pm_valid=%d listen=%d gestures=%u,%u gesture_drops=%u pm_sleep=%02x pm_wdt=%u pm_timer=%02x/%u pm_src=%02x pm_wake=%02x mv=%u,%u pm_events=%u pm_evt_ms=%u pm_hold=%u pm_hold_max=%u intent=%u boot_raw=%08x boot_strap=%08x usb_ev=%08x usj_clk=%d prev=%u,%u,%u,%08x,%x,%u,%u,%u,%u,%08x,%08x,%08x\n",
+ snprintf(out,size,"VIBE v=11 reset=%d uptime=%lld board=%d mic=%d usb=%d yellow=%d blue=%d rms=%.6f samples=%u queued=%u drops=%u underflows=%u errors=%u g0=%d presses=%u,%u pm_btn=%02x pm_cfg=%02x pm_pwr=%02x led_cfg_ok=%d pm_id=%08x pm_cfg2=%02x pm_func=%04x pm_drv=%02x pm_io=%02x pm_valid=%d listen=%d gestures=%u,%u gesture_drops=%u pm_sleep=%02x pm_wdt=%u pm_timer=%02x/%u pm_src=%02x pm_wake=%02x mv=%u,%u pm_events=%u pm_evt_ms=%u pm_hold=%u pm_hold_max=%u intent=%u boot_raw=%08x boot_strap=%08x usb_ev=%08x usj_clk=%d prev=%u,%u,%u,%08x,%x,%u,%u,%u,%u,%08x,%08x,%08x\n",
   int(esp_reset_reason()),esp_timer_get_time()/1000,int(M5.getBoard()),int(mic_running.load()),int(connected.load()),int(yellow.load()),int(blue.load()),double(level.load()),c,q,d,u,errors.load(),gpio_get_level(GPIO_NUM_0),yellow_presses.load(),blue_presses.load(),pmic_buttons.load(),pmic_config.load(),pmic_power.load(),led_config_ok,pmic_id.load(),pmic_config2.load(),pmic_func.load(),pmic_drive.load(),pmic_input.load(),int(pmic_valid.load()),int(listen_requested.load()),cursor_steps.load(),wheel_steps.load(),gesture_drops.load(),pmic_sleep.load(),pmic_wdt.load(),pmic_timer.load(),pmic_seconds.load(),pmic_source.load(),pmic_wake.load(),battery_mv.load(),usb_mv.load(),
   pmic_events.load(),pmic_event_ms.load(),pmic_hold_ms.load(),pmic_hold_max_ms.load(),maintenance_intent.load(),unsigned(boot_reset_raw),unsigned(boot_strap_raw),unsigned(vibe_usb_lifecycle()),int(bool(REG_READ(SYSTEM_PERIP_CLK_EN1_REG)&SYSTEM_USB_DEVICE_CLK_EN)),
   unsigned(previous_diagnostic_valid),unsigned(previous_diagnostic.uptime_ms),unsigned(previous_diagnostic.intent),unsigned(previous_diagnostic.pmic_state),unsigned(previous_diagnostic.flags),unsigned(previous_diagnostic.events),unsigned(previous_diagnostic.last_event_ms),unsigned(previous_diagnostic.held_ms),unsigned(previous_diagnostic.max_held_ms),unsigned(previous_diagnostic.reset_raw),unsigned(previous_diagnostic.strap_raw),unsigned(previous_diagnostic.usb_events));
+ size_t used=strlen(out);if(used && out[used-1]=='\n')out[--used]=0;
+ char radio[512];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),radio);
+}
+static void draw_microphone(M5Canvas &canvas,uint16_t color,int radius,bool muted){
+ canvas.fillSprite(TFT_BLACK);
+ canvas.drawCircle(180,180,radius,color);canvas.drawCircle(180,180,radius-1,color);
+ canvas.fillRoundRect(140,80,80,132,40,color);
+ canvas.fillRoundRect(116,145,128,100,55,color);
+ canvas.fillRoundRect(126,134,108,99,45,TFT_BLACK);
+ canvas.fillRoundRect(140,80,80,132,40,color);
+ canvas.fillRoundRect(175,236,10,40,5,color);
+ canvas.fillRoundRect(147,274,66,10,5,color);
+ if(muted)canvas.drawWideLine(118,97,243,278,8,color);
 }
 extern "C" void app_main() {
+ main_task=xTaskGetCurrentTaskHandle();
  boot_reset_raw=REG_READ(RTC_CNTL_RESET_STATE_REG);boot_strap_raw=REG_READ(GPIO_STRAP_REG);
  previous_diagnostic=diagnostic_read(retained_diagnostic);
  previous_diagnostic_valid=diagnostic_valid(previous_diagnostic);
@@ -141,6 +166,12 @@ extern "C" void app_main() {
  cursor_events=xQueueCreate(32,sizeof(int8_t));wheel_events=xQueueCreate(32,sizeof(int8_t));assert(cursor_events && wheel_events);
  auto cfg=M5.config();cfg.internal_spk=false;cfg.internal_imu=false;cfg.internal_rtc=false;
  cfg.fallback_board=m5::board_t::board_M5StopWatch;M5.begin(cfg);
+ // Hold both side keys at boot to bypass all wireless initialization. Keyboard
+ // arming already requires both keys to be released before any HID is emitted.
+ if(!gpio_get_level(GPIO_NUM_1) && !gpio_get_level(GPIO_NUM_2)){
+  vTaskDelay(pdMS_TO_TICKS(20));
+  wireless_safe_boot=!gpio_get_level(GPIO_NUM_1) && !gpio_get_level(GPIO_NUM_2);
+ }
  // Change only the status LED default level; preserve charging and power rails.
  uint8_t power_before=0,power_after=0;
  auto& pmic=M5.Power.M5pm1;
@@ -161,8 +192,13 @@ extern "C" void app_main() {
  if(mic_ok && !M5.getIOExpander(0).digitalWrite(m5::M5IOE1_Class::gpio3,false)){mic_ok=false;++errors;}
  M5Canvas canvas(&M5.Display);canvas.setColorDepth(16);canvas.setPsram(true);
  assert(canvas.createSprite(360,360));
- screen_lock=xSemaphoreCreateMutex();screen=&canvas;
- vibe_usb_init();
+ screen_lock=xSemaphoreCreateMutex();assert(screen_lock);screen=&canvas;
+ // Establish a visible recovery path before starting optional radio work.
+ draw_microphone(canvas,TFT_DARKCYAN,136,true);
+ canvas.setTextDatum(middle_center);canvas.setTextColor(TFT_DARKGREY,TFT_BLACK);
+ canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(wireless_safe_boot?"USB SAFE / WIFI OFF":"USB / STARTING WIFI",180,318);
+ canvas.pushSprite((M5.Display.width()-360)/2,(M5.Display.height()-360)/2);
+ vibe_usb_init();if(!wireless_safe_boot)wireless_init();
  float envelope=0;
  uint32_t last_power_read=0,last_draw=0;unsigned attempted_session=0;Swipe swipe;PowerButtonHistory power_buttons;
  for(;;){
@@ -181,12 +217,12 @@ extern "C" void app_main() {
   if(M5.Touch.isEnabled()){
    M5.Touch.update(now);bool pressed=M5.Touch.getCount()==1 && M5.Touch.getDetail().isPressed();
    int x=0,y=0;if(pressed){x=M5.Touch.getDetail().x;y=M5.Touch.getDetail().y;}
-   int horizontal=0,vertical=0;swipe.update(connected.load(),pressed,x,y,horizontal,vertical);
+   int horizontal=0,vertical=0;swipe.update(connected.load() || wireless_ready(),pressed,x,y,horizontal,vertical);
    for(int i=0;i<abs(horizontal);i++){
     int8_t dir=horizontal>0?1:-1;
     if(xQueueSend(cursor_events,&dir,0)==pdTRUE)++cursor_steps;else ++gesture_drops;
    }
-   if(vertical){int8_t step=vertical;
+   if(vertical){int8_t step=vertical;wireless_wheel(step);
     if(xQueueSend(wheel_events,&step,0)==pdTRUE)wheel_steps+=abs(vertical);else ++gesture_drops;}
   }
   // Explicit maintenance only: never reset the PMIC automatically at boot.
@@ -222,16 +258,14 @@ extern "C" void app_main() {
   uint16_t color=canvas.color565((held?255:40)*light,(held?180:230)*light,(held?35:200)*light);
   if(!mic_ok)color=TFT_RED;
   xSemaphoreTake(screen_lock,portMAX_DELAY);
-  canvas.fillSprite(TFT_BLACK);
   int radius=136+int((held?pulse:envelope*pulse)*15);
-  canvas.drawCircle(180,180,radius,color);canvas.drawCircle(180,180,radius-1,color);
-  canvas.fillRoundRect(140,80,80,132,40,color);
-  canvas.fillRoundRect(116,145,128,100,55,color);
-  canvas.fillRoundRect(126,134,108,99,45,TFT_BLACK);
-  canvas.fillRoundRect(140,80,80,132,40,color);
-  canvas.fillRoundRect(175,236,10,40,5,color);
-  canvas.fillRoundRect(147,274,66,10,5,color);
-  if(!listen_requested.load())canvas.drawWideLine(118,97,243,278,8,color);
+  draw_microphone(canvas,color,radius,!listen_requested.load());
+  wireless_view_t radio;wireless_view(&radio);char footer[48];
+  if(wireless_safe_boot)snprintf(footer,sizeof(footer),"USB SAFE / WIFI OFF");
+  else if(radio.error!=ESP_OK)snprintf(footer,sizeof(footer),"USB / WIFI ERR %X",unsigned(radio.error));
+  else snprintf(footer,sizeof(footer),"%s",wireless_ready()?"WIRELESS":(radio.initialized?"USB / SEARCHING":"USB / STARTING WIFI"));
+  canvas.setTextDatum(middle_center);canvas.setTextColor(radio.error!=ESP_OK?TFT_ORANGE:(wireless_ready()?TFT_CYAN:TFT_DARKGREY),TFT_BLACK);
+  canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(footer,180,318);
   canvas.pushSprite((M5.Display.width()-360)/2,(M5.Display.height()-360)/2);
   xSemaphoreGive(screen_lock);
   vTaskDelay(pdMS_TO_TICKS(8));

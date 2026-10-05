@@ -10,6 +10,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/soc.h"
 #include "soc/usb_serial_jtag_reg.h"
@@ -30,7 +31,13 @@ static const tusb_desc_device_t device = {
  .bLength=sizeof(tusb_desc_device_t), .bDescriptorType=TUSB_DESC_DEVICE,
  .bcdUSB=0x0200, .bDeviceClass=TUSB_CLASS_MISC, .bDeviceSubClass=MISC_SUBCLASS_COMMON,
  .bDeviceProtocol=MISC_PROTOCOL_IAD, .bMaxPacketSize0=64,
- .idVendor=0xcafe, .idProduct=0x4020, .bcdDevice=0x0102,
+ .idVendor=0xcafe,
+#ifdef VIBE_RECEIVER
+ .idProduct=0x4021,
+#else
+ .idProduct=0x4020,
+#endif
+ .bcdDevice=0x0103,
  .iManufacturer=1, .iProduct=2, .iSerialNumber=3, .bNumConfigurations=1
 };
 enum { AUDIO_CONTROL, AUDIO_STREAM, KEYBOARD, CDC_CONTROL, CDC_DATA, INTERFACES };
@@ -48,7 +55,11 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance) {(void)instance;re
 uint16_t const *tud_descriptor_string_cb(uint8_t index,uint16_t langid) {
  (void)langid;
  static uint16_t result[64];
+ #ifdef VIBE_RECEIVER
+ static const char *strings[]={"", "Local prototype", "StopWatch Receiver C480", "9C139E8AC480-VIBE1", "StopWatch Wireless Microphone", "StopWatch Wireless Controls", "Diagnostics"};
+#else
  static const char *strings[]={"", "Local prototype", "StopWatch Vibe", "288485439560-VIBE1", "StopWatch Vibe Microphone", "StopWatch Vibe Controls", "Diagnostics"};
+#endif
  if(index==0){result[0]=0x0304;result[1]=0x0409;return result;}
  if(index>=sizeof(strings)/sizeof(strings[0]))return NULL;
  size_t n=strlen(strings[index]);if(n>63)n=63;
@@ -68,17 +79,54 @@ void tud_hid_set_report_cb(uint8_t instance,uint8_t id,hid_report_type_t type,co
  (void)instance;(void)id;(void)type;(void)buffer;(void)size;
 }
 static _Atomic unsigned mounts,unmounts,suspends,resumes;
+// Diagnostic counters only; packet generation and scheduling stay unchanged.
+static _Atomic uint32_t usb_audio_frames,usb_audio_load_bytes;
+static _Atomic uint32_t usb_audio_p94,usb_audio_p96,usb_audio_p98,usb_audio_pother;
+static _Atomic uint32_t usb_audio_last_us,usb_audio_gap_max_us,usb_audio_gaps,usb_audio_short;
+static _Atomic uint32_t usb_audio_alt;
 uint32_t vibe_usb_lifecycle(void){
  return (atomic_load(&mounts)&255) | ((atomic_load(&unmounts)&255)<<8)
   | ((atomic_load(&suspends)&255)<<16) | ((atomic_load(&resumes)&255)<<24);
 }
-void tud_mount_cb(void){++mounts;vibe_connected(true);}
-void tud_umount_cb(void){++unmounts;vibe_connected(false);}
-void tud_suspend_cb(bool wake){(void)wake;++suspends;vibe_connected(false);}
-void tud_resume_cb(void){++resumes;vibe_connected(true);}
+void tud_mount_cb(void){++mounts;atomic_store_explicit(&usb_audio_last_us,0,memory_order_relaxed);atomic_store_explicit(&usb_audio_alt,0,memory_order_relaxed);vibe_connected(true);}
+void tud_umount_cb(void){++unmounts;atomic_store_explicit(&usb_audio_last_us,0,memory_order_relaxed);atomic_store_explicit(&usb_audio_alt,0,memory_order_relaxed);vibe_connected(false);}
+void tud_suspend_cb(bool wake){(void)wake;++suspends;atomic_store_explicit(&usb_audio_last_us,0,memory_order_relaxed);vibe_connected(false);}
+void tud_resume_cb(void){++resumes;atomic_store_explicit(&usb_audio_last_us,0,memory_order_relaxed);vibe_connected(true);}
+
+void vibe_usb_audio_status(char *out,size_t size){
+ // Post-load bytes are scheduled for the endpoint, not a host receipt count.
+ snprintf(out,size,"uac_alt=%u uac_pre=%u uac_load_bytes=%u uac_p94=%u uac_p96=%u uac_p98=%u uac_pother=%u uac_gap_max_us=%u uac_gap_gt1500=%u uac_short=%u",
+  (unsigned)atomic_load_explicit(&usb_audio_alt,memory_order_relaxed),
+  (unsigned)atomic_load_explicit(&usb_audio_frames,memory_order_relaxed),
+  (unsigned)atomic_load_explicit(&usb_audio_load_bytes,memory_order_relaxed),
+  (unsigned)atomic_load_explicit(&usb_audio_p94,memory_order_relaxed),
+  (unsigned)atomic_load_explicit(&usb_audio_p96,memory_order_relaxed),
+  (unsigned)atomic_load_explicit(&usb_audio_p98,memory_order_relaxed),
+  (unsigned)atomic_load_explicit(&usb_audio_pother,memory_order_relaxed),
+  (unsigned)atomic_load_explicit(&usb_audio_gap_max_us,memory_order_relaxed),
+  (unsigned)atomic_load_explicit(&usb_audio_gaps,memory_order_relaxed),
+  (unsigned)atomic_load_explicit(&usb_audio_short,memory_order_relaxed));
+}
+
+bool tud_audio_set_itf_cb(uint8_t port,const tusb_control_request_t *r){
+ (void)port;
+ if((r->wIndex&255)==AUDIO_STREAM){
+  atomic_store_explicit(&usb_audio_last_us,0,memory_order_relaxed);
+  atomic_store_explicit(&usb_audio_alt,r->wValue&255,memory_order_relaxed);
+ }
+ return true;
+}
+bool tud_audio_set_itf_close_EP_cb(uint8_t port,const tusb_control_request_t *r){
+ (void)port;
+ // wValue is the requested new alt; this callback closes the previous EP.
+ if((r->wIndex&255)==AUDIO_STREAM){
+  atomic_store_explicit(&usb_audio_last_us,0,memory_order_relaxed);
+  atomic_store_explicit(&usb_audio_alt,0,memory_order_relaxed);
+ }
+ return true;
+}
 
 static uint32_t rate=48000;
-static uint32_t usb_audio_frames=0;
 static uint8_t clock_valid=1, muted[2]={0};
 static int16_t volume[2]={0};
 static int32_t scale=32768;
@@ -111,10 +159,26 @@ bool tud_audio_get_req_entity_cb(uint8_t port,const tusb_control_request_t *r) {
 }
 bool tud_audio_tx_done_pre_load_cb(uint8_t port,uint8_t itf,uint8_t ep,uint8_t alt) {
  (void)port;(void)itf;(void)ep;(void)alt;
- usb_audio_frames++;int16_t data[48];vibe_pcm(data,48);
+ uint32_t now=(uint32_t)esp_timer_get_time();
+ uint32_t previous=atomic_exchange_explicit(&usb_audio_last_us,now,memory_order_relaxed);
+ if(previous){
+  uint32_t gap=now-previous;
+  if(gap>atomic_load_explicit(&usb_audio_gap_max_us,memory_order_relaxed))atomic_store_explicit(&usb_audio_gap_max_us,gap,memory_order_relaxed);
+  if(gap>1500)atomic_fetch_add_explicit(&usb_audio_gaps,1,memory_order_relaxed);
+ }
+ atomic_fetch_add_explicit(&usb_audio_frames,1,memory_order_relaxed);
+ int16_t data[48];vibe_pcm(data,48);
  if(muted[0]||muted[1])memset(data,0,sizeof(data));
  else if(scale!=32768)for(unsigned i=0;i<48;i++)data[i]=(int32_t)data[i]*scale/32768;
- tud_audio_write(data,sizeof(data));return true;
+ if(tud_audio_write(data,sizeof(data))!=sizeof(data))atomic_fetch_add_explicit(&usb_audio_short,1,memory_order_relaxed);
+ return true;
+}
+bool tud_audio_tx_done_post_load_cb(uint8_t port,uint16_t bytes,uint8_t itf,uint8_t ep,uint8_t alt){
+ (void)port;(void)itf;(void)ep;(void)alt;
+ atomic_fetch_add_explicit(&usb_audio_load_bytes,bytes,memory_order_relaxed);
+ _Atomic uint32_t *counter=bytes==94?&usb_audio_p94:(bytes==96?&usb_audio_p96:(bytes==98?&usb_audio_p98:&usb_audio_pother));
+ atomic_fetch_add_explicit(counter,1,memory_order_relaxed);
+ return true;
 }
 
 static void control_task(void *arg) {
@@ -135,7 +199,13 @@ static void control_task(void *arg) {
   while(tud_cdc_available()) {
    char c=tud_cdc_read_char();
    if(c=='P' && !snapshot){snapshot=vibe_snapshot(&snap_size);snap_pos=0;
-    if(snapshot){char h[64];int n=snprintf(h,sizeof(h),"FRAME 360 360 %u\n",(unsigned)snap_size);tud_cdc_write(h,n);tud_cdc_write_flush();}}
+    if(snapshot){char h[64];int n=snprintf(h,sizeof(h),
+#ifdef VIBE_RECEIVER
+     "FRAME 320 240 %u\n",(unsigned)snap_size
+#else
+     "FRAME 360 360 %u\n",(unsigned)snap_size
+#endif
+);tud_cdc_write(h,n);tud_cdc_write_flush();}}
    maintenance_action_t action=maintenance_byte(&maintenance,c,pdTICKS_TO_MS(xTaskGetTickCount()));
    if(action==MAINT_POWER_RESET)vibe_request_power_reset();
    if(action==MAINT_BOOT) {
@@ -157,8 +227,8 @@ static void control_task(void *arg) {
     snap_pos+=tud_cdc_write(snapshot+snap_pos,n);tud_cdc_write_flush();
     if(snap_pos==snap_size){free(snapshot);snapshot=NULL;}}
   }
-  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>1024) {
-   last=now; char line[1024]; vibe_status(line,sizeof(line));
+  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>1536) {
+   last=now; char line[1536]; vibe_status(line,sizeof(line));
    tud_cdc_write(line,strlen(line));tud_cdc_write_flush();
   }
   vTaskDelay(pdMS_TO_TICKS(1));
@@ -176,6 +246,12 @@ void vibe_usb_init(void) {
   usb_serial_jtag_ll_enable_bus_clock(false);
  }
  assert(tusb_init());
+#ifdef VIBE_RECEIVER
+ // Isochronous packets have a 1 ms deadline. Keep their worker off Wi-Fi's
+ // core 0 and above TCP/IP work; tud_task() blocks when no USB event is pending.
+ xTaskCreatePinnedToCore(usb_task,"usb",6144,NULL,configMAX_PRIORITIES-1,NULL,1);
+#else
  xTaskCreatePinnedToCore(usb_task,"usb",6144,NULL,8,NULL,0);
- xTaskCreatePinnedToCore(control_task,"controls",4096,NULL,4,NULL,0);
+#endif
+ xTaskCreatePinnedToCore(control_task,"controls",6144,NULL,4,NULL,0);
 }

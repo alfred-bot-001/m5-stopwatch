@@ -7,3 +7,9 @@ tools/coreaudio_capture
 tools/hid_monitor
 sdkconfig.old
 tools/select_input
+
+private/
+__pycache__/
+receiver/build*/
+receiver/sdkconfig*
+!receiver/sdkconfig.defaults
