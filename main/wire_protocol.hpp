@@ -26,6 +26,16 @@ inline bool valid(const Control &p){
  return p.magic_value==magic && p.ver==version && p.bytes==sizeof(p) && p.listening<=1
   && p.reserved==0 && (!p.listening || (p.keys[0]&0x40));
 }
+// Call only for validated packets in the current control session. Metadata
+// changes and idle heartbeats must not keep either display illuminated.
+inline bool has_input(const Control &p){
+ if(p.listening || p.wheel)return true;
+ for(auto key:p.keys)if(key)return true;
+ return false;
+}
+inline bool control_activity(const Control &current,const Control &previous){
+ return has_input(current) || has_input(previous); // Include the last release.
+}
 inline bool fresh(uint32_t now,uint32_t then){return uint32_t(now-then)<lease_ms;}
 inline bool newer(uint32_t value,uint32_t previous){return int32_t(value-previous)>0;}
 // Bounded FIFO: drift/latency is bounded, stale speech is discarded on release.

@@ -16,7 +16,7 @@ void wireless_wheel(int8_t wheel);
 void wireless_audio(const int16_t *pcm,size_t samples);
 typedef struct {
  bool connected,host,listening,initialized;
- uint16_t battery_mv,level;uint32_t received,lost;
+ uint16_t battery_mv,level;uint32_t received,lost,activity;
  esp_err_t error;const char *stage;
 } wireless_view_t;
 void wireless_view(wireless_view_t *view);

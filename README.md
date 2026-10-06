@@ -1,13 +1,13 @@
 # StopWatch Vibe
 
-M5Stack StopWatch C152 的 USB 麦克风、双键键盘和触摸滚轮固件，面向 Mac 上的语音编程。v11 增加[立创实战派 ESP32-S3 无线接收器](receiver/README.md)，已完成无线讲话试测及接收器状态页、断电重插验证，最终无线键鼠验收仍待完成；此前已验证的有线版本为 v10。StopWatch 闲置黑屏的根因仍在调查。实测范围见 [验证记录](VALIDATION.md)。
+M5Stack StopWatch C152 的 USB 麦克风、双键键盘和触摸滚轮固件，面向 Mac 上的语音编程。v11 增加[立创实战派 ESP32-S3 无线接收器](receiver/README.md)，已完成无线讲话试测及接收器状态页、断电重插验证，最终无线键鼠验收仍待完成；此前已验证的有线版本为 v10。此前 StopWatch 非预期闲置黑屏的根因仍在调查。实测范围见 [验证记录](VALIDATION.md)。
 
 - 黄色左键：按住开启麦克风，同时保持右 Option（USB Right Alt）；松开关闭采集并释放按键。
 - 蓝色键：Enter。两键同时按是 Option+Enter；长按 Enter 的重复行为由电脑决定。
 - 麦克风：内置 ES8311，48 kHz / 16 bit / 单声道 USB Audio。未按黄色键时停止 I2S 采集，关闭 ADC 模拟电路、清空缓存，USB 音频接口保持连接并输出静音。v11 启用 Wi-Fi 连接配套接收器，不启用蓝牙。芯片重新启动需要时间，特别是首次冷启动可能约一秒，按住后稍等再说话。
 - 屏幕左右滑：发送左/右方向键，移动文字光标；每滑动约 24 屏幕像素一步。若同时按黄色键，电脑会收到 Option+方向键。
 - 屏幕上下滑：发送鼠标滚轮，上滑为正向滚轮、下滑为反向；实际页面方向受 macOS 的「自然滚动」设置影响。手势锁定首次明确的横/纵方向，抬手后重新判定；轻点和小幅抖动不触发。
-- 屏幕：闲置时显示青绿色带斜线麦克风，按住黄色键时显示琥珀色脉动麦克风。红色代表麦克风初始化失败。待机绘制频率降为约 10fps；未测量整机电流或续航增益。
+- 屏幕：亮屏待机时显示青绿色带斜线麦克风，按住黄色键时显示琥珀色脉动麦克风。红色代表麦克风初始化失败。连续30分钟无交互后自动息屏，按黄/蓝键或触摸本机屏幕唤醒，原有按键和滑动功能继续生效。亮屏待机绘制频率约10fps，息屏时停止绘制；未测量整机电流或续航增益。
 - 断线重插时，必须先松开两键，避免重放旧按键。
 - 启动时关闭 M5PM1 状态灯输出，保留充电和供电位。v7 另提供受保护的整机电源重启命令；本机执行后，用户确认此前持续闪烁的绿灯已停止，详情见验证记录。
 
@@ -19,6 +19,10 @@ macOS 将有线 StopWatch 识别为 `StopWatch Vibe`，将接收器识别为 `St
 - 无线：C480 用数据线连接电脑，StopWatch 自动连接 C480 建立的 `StopWatch-C480` 专用 Wi-Fi，再由 C480 输出 USB 键鼠和麦克风。StopWatch 可以用电池供电；电脑无需加入该 Wi-Fi，也无需家用路由器。
 - 两条通路自动选择。StopWatch 显示 `WIRELESS` 时优先走接收器；显示 `USB / SEARCHING` 时仍在寻找接收器，此时自身 USB 有线功能可用。切换后先松开两键，再开始操作。
 - C480 的「USB连接」与「StopWatch连接」是两个独立状态。亮屏只说明有供电；「等待 USB」说明尚未完成主机 USB 连接，「等待 StopWatch」说明尚无有效无线控制连接。
+
+两端独立计算30分钟息屏时间。StopWatch 的黄/蓝键、触摸及按住讲话会延长亮屏；C480 的本机触摸、运行时短按 BOOT，或收到有效按键、滚轮、按住讲话（PTT）控制输入，会保持亮屏或唤醒。普通连接心跳、电量/电平更新、USB轮询和空闲静音音频不会延长亮屏；按住讲话本身仍属于交互，即使此时没有说话。息屏仅将 StopWatch AMOLED 亮度设为0或关闭 C480 背光，并停止画面刷新，USB、Wi-Fi 和输入处理保持运行，不关闭 MCU 或 PMIC 电源。
+
+诊断中的 `display_awake` 表示显示是否点亮，`display_idle_ms` 是距最近交互的毫秒数，`display_timeout_ms` 的生产默认值为 `1800000`。这项主动息屏功能不代表此前非预期黑屏、绿灯频闪故障已解决，历史排查限制仍见下文及验证记录。
 
 无线重连在工作任务中执行：连接请求立即失败时按250ms至4s退避重试；连接进行中等待最多15秒再核对实际关联和静态IP，避免打断健康链路。诊断包含关联、断线原因、重试次数及 TCP 错误；接收器报告已关联站点数。配对文件保持不变，不通过擦除 NVS 或反复重启整台设备恢复连接。
 
@@ -51,6 +55,8 @@ clang++ -std=c++17 -Wall -Wextra -Werror tests/diagnostics.cpp -o /tmp/stopwatch
 /tmp/stopwatch-diagnostics-test
 clang++ -std=c++17 -Wall -Wextra -Werror tests/station_reconnect.cpp -o /tmp/stopwatch-reconnect-test
 /tmp/stopwatch-reconnect-test
+clang++ -std=c++17 -Wall -Wextra -Werror tests/display_idle.cpp -o /tmp/stopwatch-display-idle-test
+/tmp/stopwatch-display-idle-test
 python3 -B tests/diagnose.py
 # 在 ESP-IDF Python 环境中（需要 pyelftools）：
 python tests/usb_descriptors.py build/stopwatch_vibe.elf

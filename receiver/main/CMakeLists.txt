@@ -2,3 +2,6 @@ idf_component_register(SRCS "receiver.cpp" "../../main/usb.c" "../../main/wirele
 target_compile_definitions(${COMPONENT_LIB} PRIVATE VIBE_RECEIVER=1)
 idf_component_get_property(tusb_lib tinyusb COMPONENT_LIB)
 target_include_directories(${tusb_lib} PUBLIC "${CMAKE_CURRENT_LIST_DIR}/../../main")
+if(DEFINED VIBE_DISPLAY_IDLE_MS)
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE VIBE_DISPLAY_IDLE_MS=${VIBE_DISPLAY_IDLE_MS})
+endif()

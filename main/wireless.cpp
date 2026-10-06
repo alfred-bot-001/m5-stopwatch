@@ -25,6 +25,7 @@ static constexpr int control_port=38470,audio_port=38471;
 static portMUX_TYPE guard=portMUX_INITIALIZER_UNLOCKED;
 static std::atomic<bool> wifi_up{false},peer_usb{false},local_usb{false},queue_fault{false};
 static std::atomic<uint32_t> seen{0},token{0},audio_seen{0},tx_audio_count{0},rx_audio_count{0},tx_errors{0},connections{0};
+static std::atomic<uint32_t> input_activity{0};
 #ifdef VIBE_RECEIVER
 struct KeyEvent{uint32_t epoch;uint8_t keys[8];};
 struct WheelEvent{uint32_t epoch;int8_t wheel;};
@@ -363,6 +364,7 @@ static void receiver_control(void*){
    seen=now_ms();peer_usb=local_usb.load();
    uint8_t zero[8]{};
    portENTER_CRITICAL(&guard);
+   if(control_activity(p,state))++input_activity;
    if(observed_epoch!=usb_epoch){observed_epoch=usb_epoch;receiver_armed=false;memset(previous,0,8);}
    if(!local_usb)receiver_armed=false;
    if(local_usb && !memcmp(p.keys,zero,8) && !p.listening)receiver_armed=true;
@@ -391,7 +393,7 @@ extern "C" void wireless_view(wireless_view_t *v){
 #else
  v->host=peer_usb.load();
 #endif
- v->received=rx_audio_count.load();
+ v->received=rx_audio_count.load();v->activity=input_activity.load();
  portENTER_CRITICAL(&guard);v->listening=v->connected && state.listening;v->battery_mv=state.battery_mv;v->level=state.level;v->lost=audio_buffer.lost;portEXIT_CRITICAL(&guard);
 }
 extern "C" void wireless_status(char *out,size_t size){

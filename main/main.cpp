@@ -5,6 +5,7 @@
 #include "buttons.hpp"
 #include "gestures.hpp"
 #include "diagnostics.hpp"
+#include "display_idle.hpp"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -45,6 +46,9 @@ static TaskHandle_t main_task=nullptr;
 static std::atomic<bool> listen_requested{false},capture_enabled{false},mic_running{false};
 static std::atomic<unsigned> listen_session{0};
 static std::atomic<unsigned> cursor_steps{0},wheel_steps{0},gesture_drops{0};
+static constexpr uint8_t screen_brightness=100;
+static std::atomic<bool> display_activity{false},display_awake{true};
+static std::atomic<uint32_t> display_idle_ms{0};
 static QueueHandle_t reports,cursor_events,wheel_events;
 static SemaphoreHandle_t screen_lock;
 static M5Canvas *screen=nullptr;
@@ -83,6 +87,7 @@ extern "C" void vibe_service() {
  bool edge=keyboard.update(!gpio_get_level(GPIO_NUM_2),!gpio_get_level(GPIO_NUM_1),active,now,report);
  if(!old_a && keyboard.a.stable)++yellow_presses;
  if(!old_b && keyboard.b.stable)++blue_presses;
+ if(keyboard.a.raw || keyboard.b.raw || old_a!=keyboard.a.stable || old_b!=keyboard.b.stable)display_activity=true;
  yellow=keyboard.a.stable;blue=keyboard.b.stable;
  bool listen=active && keyboard.armed && keyboard.a.raw && keyboard.a.stable;
  portENTER_CRITICAL(&lock);
@@ -142,7 +147,7 @@ extern "C" void vibe_status(char *out,size_t size) {
   pmic_events.load(),pmic_event_ms.load(),pmic_hold_ms.load(),pmic_hold_max_ms.load(),maintenance_intent.load(),unsigned(boot_reset_raw),unsigned(boot_strap_raw),unsigned(vibe_usb_lifecycle()),int(bool(REG_READ(SYSTEM_PERIP_CLK_EN1_REG)&SYSTEM_USB_DEVICE_CLK_EN)),
   unsigned(previous_diagnostic_valid),unsigned(previous_diagnostic.uptime_ms),unsigned(previous_diagnostic.intent),unsigned(previous_diagnostic.pmic_state),unsigned(previous_diagnostic.flags),unsigned(previous_diagnostic.events),unsigned(previous_diagnostic.last_event_ms),unsigned(previous_diagnostic.held_ms),unsigned(previous_diagnostic.max_held_ms),unsigned(previous_diagnostic.reset_raw),unsigned(previous_diagnostic.strap_raw),unsigned(previous_diagnostic.usb_events));
  size_t used=strlen(out);if(used && out[used-1]=='\n')out[--used]=0;
- char radio[768];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),radio);
+ char radio[768];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),radio);
 }
 static void draw_microphone(M5Canvas &canvas,uint16_t color,int radius,bool muted){
  canvas.fillSprite(TFT_BLACK);
@@ -183,7 +188,7 @@ extern "C" void app_main() {
   pmic_power=power_after;
  }
  gpio_input_enable(GPIO_NUM_0);
- M5.Display.setBrightness(100);M5.Display.fillScreen(TFT_BLACK);
+ M5.Display.setBrightness(screen_brightness);M5.Display.fillScreen(TFT_BLACK);
  auto mc=M5.Mic.config();mc.sample_rate=48000;mc.over_sampling=1;mc.magnification=8;mc.task_priority=5;mc.task_pinned_core=1;M5.Mic.config(mc);
  M5.Mic.setBufferReleaseCallback(nullptr,captured);
  mic_ok=M5.getBoard()==m5::board_t::board_M5StopWatch && M5.Mic.isEnabled();
@@ -199,6 +204,7 @@ extern "C" void app_main() {
  canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(wireless_safe_boot?"USB SAFE / WIFI OFF":"USB / STARTING WIFI",180,318);
  canvas.pushSprite((M5.Display.width()-360)/2,(M5.Display.height()-360)/2);
  vibe_usb_init();if(!wireless_safe_boot)wireless_init();
+ DisplayIdle display_idle(uint32_t(esp_timer_get_time()/1000));
  float envelope=0;
  uint32_t last_power_read=0,last_draw=0;unsigned attempted_session=0;Swipe swipe;PowerButtonHistory power_buttons;
  for(;;){
@@ -216,6 +222,7 @@ extern "C" void app_main() {
   }
   if(M5.Touch.isEnabled()){
    M5.Touch.update(now);bool pressed=M5.Touch.getCount()==1 && M5.Touch.getDetail().isPressed();
+   if(M5.Touch.getCount()>0)display_activity=true;
    int x=0,y=0;if(pressed){x=M5.Touch.getDetail().x;y=M5.Touch.getDetail().y;}
    int horizontal=0,vertical=0;swipe.update(connected.load() || wireless_ready(),pressed,x,y,horizontal,vertical);
    for(int i=0;i<abs(horizontal);i++){
@@ -248,10 +255,20 @@ extern "C" void app_main() {
    pmic_valid=ok;
    save_diagnostic(esp_timer_get_time()/1000);
   }
+  bool was_awake=display_idle.awake();
+  bool awake=display_idle.update(now,display_activity.exchange(false) || listen_requested.load());
+  display_idle_ms=display_idle.idle_ms(now);
+  if(!awake){
+   if(was_awake)M5.Display.setBrightness(0);
+   display_awake=false;
+   // Keep input, PMIC diagnostics, USB and Wi-Fi running while pixels are dark.
+   vTaskDelay(pdMS_TO_TICKS(8));continue;
+  }
+  bool waking=!was_awake;
   float signal=std::fmin(1.f,std::fmax(0.f,(level.load()-0.006f)*18.f));
   envelope=std::fmax(signal,envelope*0.84f);
   float t=esp_timer_get_time()/1000000.0f;bool held=yellow.load();
-  if(uint32_t(now-last_draw)<(held?33u:100u)){vTaskDelay(pdMS_TO_TICKS(8));continue;}
+  if(!waking && uint32_t(now-last_draw)<(held?33u:100u)){vTaskDelay(pdMS_TO_TICKS(8));continue;}
   last_draw=now;
   float pulse=0.5f+0.5f*sinf(t*(held?9.f:13.f));
   float light=held?0.55f+0.45f*pulse:0.55f+0.45f*envelope*pulse;
@@ -267,6 +284,10 @@ extern "C" void app_main() {
   canvas.setTextDatum(middle_center);canvas.setTextColor(radio.error!=ESP_OK?TFT_ORANGE:(wireless_ready()?TFT_CYAN:TFT_DARKGREY),TFT_BLACK);
   canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(footer,180,318);
   canvas.pushSprite((M5.Display.width()-360)/2,(M5.Display.height()-360)/2);
+  // Restore the saved level explicitly: setBrightness(0) also changes the
+  // library's remembered brightness, so wakeup() alone would stay dark.
+  if(waking)M5.Display.setBrightness(screen_brightness);
+  display_awake=true;
   xSemaphoreGive(screen_lock);
   vTaskDelay(pdMS_TO_TICKS(8));
  }

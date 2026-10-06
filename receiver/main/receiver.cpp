@@ -1,7 +1,9 @@
 #include "vibe.h"
 #include "wireless.h"
+#include "display_idle.hpp"
 #include <M5GFX.h>
 #include <algorithm>
+#include <atomic>
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
@@ -28,6 +30,13 @@ static uint8_t *screen_dma=nullptr;
 static lgfx::LGFX_Sprite *canvas=nullptr;
 static SemaphoreHandle_t screen_lock;
 static bool display_ok=false;
+static std::atomic<bool> display_awake{false};
+static std::atomic<uint32_t> display_idle_ms{0};
+static std::atomic<esp_err_t> display_power_error{ESP_OK},touch_error{ESP_ERR_INVALID_STATE};
+static std::atomic<unsigned> touch_points{0};
+static esp_err_t boot_error=ESP_ERR_INVALID_STATE;
+static i2c_master_bus_handle_t screen_i2c_bus=nullptr;
+static i2c_master_dev_handle_t touch_io=nullptr;
 static TaskHandle_t main_task=nullptr;
 static const char *screen_stage="not_started";
 static esp_err_t screen_error=ESP_OK,pca_read_error=ESP_OK;
@@ -68,6 +77,7 @@ static bool screen_init(){
  backlight_configured=backlight_state();
  i2c_master_bus_config_t cfg{};cfg.i2c_port=I2C_NUM_0;cfg.sda_io_num=GPIO_NUM_1;cfg.scl_io_num=GPIO_NUM_2;cfg.clk_source=I2C_CLK_SRC_DEFAULT;cfg.glitch_ignore_cnt=7;cfg.flags.enable_internal_pullup=true;
  i2c_master_bus_handle_t bus=nullptr;if(!screen_step("i2c_bus",i2c_new_master_bus(&cfg,&bus)))return false;
+ screen_i2c_bus=bus;
  i2c_device_config_t device{};device.dev_addr_length=I2C_ADDR_BIT_LEN_7;device.device_address=0x19;device.scl_speed_hz=100000;
  i2c_master_dev_handle_t io=nullptr;if(!screen_step("pca_device",i2c_master_bus_add_device(bus,&device,&io)))return false;
  // Keep LCD CS high while SPI takes control of its clock/data pins.
@@ -105,7 +115,41 @@ static bool screen_init(){
  screen_lock=xSemaphoreCreateMutex();if(!screen_step("screen_lock",screen_lock?ESP_OK:ESP_ERR_NO_MEM))return false;
  if(!screen_step("backlight_duty",ledc_set_duty(LEDC_LOW_SPEED_MODE,LEDC_CHANNEL_0,1023*75/100)))return false;
  if(!screen_step("backlight_on",ledc_update_duty(LEDC_LOW_SPEED_MODE,LEDC_CHANNEL_0)))return false;
+ display_awake=true;
  return screen_step("ready",ESP_OK); // Software initialization only; panel needs visual verification.
+}
+static bool screen_backlight(bool awake){
+ esp_err_t error=ledc_set_duty(LEDC_LOW_SPEED_MODE,LEDC_CHANNEL_0,awake?1023*75/100:0);
+ if(error==ESP_OK)error=ledc_update_duty(LEDC_LOW_SPEED_MODE,LEDC_CHANNEL_0);
+ display_power_error=error;
+ if(error==ESP_OK)display_awake=awake;
+ return error==ESP_OK;
+}
+static void wake_inputs_init(){
+ // BOOT is GPIO0 with an external pull-up; only read it after normal boot.
+ gpio_config_t button{};button.pin_bit_mask=1ULL<<0;button.mode=GPIO_MODE_INPUT;
+ button.pull_up_en=GPIO_PULLUP_ENABLE;button.pull_down_en=GPIO_PULLDOWN_DISABLE;
+ button.intr_type=GPIO_INTR_DISABLE;boot_error=gpio_config(&button);
+ if(!screen_i2c_bus)return;
+ // FT6336 shares GPIO1/2 with PCA9557. INT is unconnected and RESET is
+ // shared with the ESP/LCD: poll touch status without resetting any device.
+ i2c_device_config_t device{};device.dev_addr_length=I2C_ADDR_BIT_LEN_7;
+ device.device_address=0x38;device.scl_speed_hz=100000;
+ touch_error=i2c_master_bus_add_device(screen_i2c_bus,&device,&touch_io);
+}
+static bool local_display_activity(uint32_t now){
+ static uint32_t last_touch_read=0;
+ const bool boot_pressed=boot_error==ESP_OK && !gpio_get_level(GPIO_NUM_0);
+ // Read TD_STATUS even with the backlight off. A failed read is never an
+ // interaction, and the slower error retry avoids a busy loop on a bad bus.
+ const uint32_t period=touch_error.load()==ESP_OK?50:500;
+ if(touch_io && uint32_t(now-last_touch_read)>=period){
+  last_touch_read=now;const uint8_t reg=0x02;uint8_t points=0;
+  const esp_err_t error=i2c_master_transmit_receive(touch_io,&reg,1,&points,1,20);
+  touch_error=error;
+  touch_points=error==ESP_OK && points<=2?points:0;
+ }
+ return boot_pressed || touch_points.load()!=0;
 }
 static bool screen_present(){
  const auto *pixels=static_cast<const uint8_t*>(canvas->getBuffer());
@@ -135,8 +179,9 @@ extern "C" void vibe_request_power_reset(){} // Generic receiver has no M5PM1.
 extern "C" void vibe_status(char *out,size_t size){
  char radio[768];wireless_status(radio,sizeof(radio));char usb[384];vibe_usb_audio_status(usb,sizeof(usb));
  auto bl=backlight_state();uint32_t pins[5];screen_pin_state(pins);
- snprintf(out,size,"VIBE RX v=1 uptime=%lld screen=%d screen_driver=esp_lcd spi_mhz=80 bl_pwm=75 screen_stage=%s screen_err=0x%x pca_out=%d pca_cfg=%d pca_err=0x%x bl_before=%u/%d/%u bl_config=%u/%d/%u bl_now=%u/%d/%u pins_pre=%lx/%lx/%lx/%lx/%lx pins_now=%lx/%lx/%lx/%lx/%lx main_stack_min=%u %s %s\n",
-  esp_timer_get_time()/1000,int(display_ok),screen_stage,unsigned(screen_error),pca_output,pca_config,unsigned(pca_read_error),
+ snprintf(out,size,"VIBE RX v=1 uptime=%lld screen=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u display_err=0x%x touch_points=%u touch_err=0x%x boot_err=0x%x screen_driver=esp_lcd spi_mhz=80 bl_pwm=%d screen_stage=%s screen_err=0x%x pca_out=%d pca_cfg=%d pca_err=0x%x bl_before=%u/%d/%u bl_config=%u/%d/%u bl_now=%u/%d/%u pins_pre=%lx/%lx/%lx/%lx/%lx pins_now=%lx/%lx/%lx/%lx/%lx main_stack_min=%u %s %s\n",
+  esp_timer_get_time()/1000,int(display_ok),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),unsigned(display_power_error.load()),touch_points.load(),unsigned(touch_error.load()),unsigned(boot_error),display_awake.load()?75:0,
+  screen_stage,unsigned(screen_error),pca_output,pca_config,unsigned(pca_read_error),
   backlight_before.mux,backlight_before.level,backlight_before.latch,backlight_configured.mux,backlight_configured.level,backlight_configured.latch,
   bl.mux,bl.level,bl.latch,
   pins_before_usb[0],pins_before_usb[1],pins_before_usb[2],pins_before_usb[3],pins_before_usb[4],
@@ -167,7 +212,28 @@ static void draw_screen(){
 extern "C" void app_main(){
  main_task=xTaskGetCurrentTaskHandle();
  display_ok=screen_init();
+ wake_inputs_init();
  screen_pin_state(pins_before_usb);draw_screen();
  vibe_usb_init();wireless_init();
- for(;;){draw_screen();vTaskDelay(pdMS_TO_TICKS(100));}
+ uint32_t now=uint32_t(esp_timer_get_time()/1000),last_draw=now,observed_activity=0;
+ DisplayIdle idle(now);
+ for(;;){
+  now=uint32_t(esp_timer_get_time()/1000);
+  wireless_view_t view;wireless_view(&view);
+  const bool remote_activity=view.activity!=observed_activity || (view.connected && view.listening);
+  observed_activity=view.activity;
+  const bool awake=idle.update(now,local_display_activity(now) || remote_activity);
+  display_idle_ms=idle.idle_ms(now);
+  if(display_ok){
+   if(!awake){
+    if(display_awake.load())screen_backlight(false);
+   }else if(!display_awake.load() || uint32_t(now-last_draw)>=100){
+    // Refresh before lighting up, so wake shows current radio/USB state.
+    draw_screen();last_draw=now;
+    if(display_ok && !display_awake.load())screen_backlight(true);
+   }
+  }
+  // Poll local wake inputs while asleep; USB/Wi-Fi workers remain running.
+  vTaskDelay(pdMS_TO_TICKS(50));
+ }
 }

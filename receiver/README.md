@@ -7,6 +7,10 @@
 
 320×240 状态页显示无线连接、按住讲话状态、实时音量条、StopWatch 电池电压、USB 连接和累计音频丢包。电池电压不是经过标定的电量百分比。显示的是远端 StopWatch 麦克风状态，接收器自身的双麦克风、扬声器和摄像头不启用。
 
+连续30分钟没有本机交互或有效控制输入后，C480 关闭背光并停止画面刷新；USB、Wi-Fi、键鼠和音频处理保持运行。触摸 C480 屏幕、运行时短按 BOOT，或收到 StopWatch 的有效按键、滚轮、按住讲话（PTT）输入即可唤醒。普通连接心跳、电量/电平更新、USB轮询和空闲静音音频不会延长亮屏；持续按住讲话仍属于交互，即使没有说话。StopWatch 的屏幕独立计时，由其黄/蓝键或触摸本机屏幕唤醒。
+
+唤醒时先刷新状态页，再恢复背光，不重新初始化屏幕或切断供电。`display_awake`、`display_idle_ms` 和 `display_timeout_ms` 分别报告亮屏状态、距最近交互的毫秒数和息屏间隔，生产默认间隔为 `1800000`。本功能未实测电流或续航增益，也不改变此前非预期黑屏故障的验收限制。
+
 屏幕采用 ST7789；SPI3 的 MOSI/SCLK/DC 分别为 GPIO40/41/39，模式2，80MHz。背光 GPIO42 低电平有效，使用 LEDC 25kHz、10bit 分辨率、反相输出，亮度75%；初始化明确设置引脚复用，避免保留默认 MTMS 功能。PCA9557 地址0x19，I2C SDA/SCL 为 GPIO1/2；IO0 是 LCD_CS，IO1 保持关闭功放，IO2 保持摄像头休眠。使用 IDF 新版 I2C API，避免与 M5GFX 混用旧驱动。
 
 实体传输采用 ESP-IDF `esp_lcd` ST7789 驱动，M5GFX 仅负责离屏绘图。初始化沿用原厂顺序：保持 CS 高，建立 SPI/面板 IO，先调用 `esp_lcd_panel_reset` 完成首笔 SPI 交易，使模式2时钟进入稳定状态；再拉低 CS，执行面板初始化、反色、方向与显示设置。CS 高时屏幕不会接收这笔软件复位命令。帧缓存按16行复制到固定内部 DMA 缓冲，每次等待传输完成后复用，避免异步 SPI 读取时覆盖数据。诊断包含 `screen_driver=esp_lcd` 和出错阶段/错误码；`screen=1` 仅表示软件初始化完成，SPI 没有屏幕读回通道。
@@ -49,6 +53,13 @@
 python3 tools/create_pairing.py
 bash tools/build.sh build
 bash tools/build_receiver.sh build
+```
+
+息屏计时及有效控制输入判断可在项目根目录运行原生测试：
+
+```sh
+clang++ -std=c++17 -Wall -Wextra -Werror tests/display_idle.cpp -o /tmp/stopwatch-display-idle-test
+/tmp/stopwatch-display-idle-test
 ```
 
 先核对原固件备份，再分别调用 `tools/flash.py`（StopWatch）和 `tools/flash_receiver.py`（C480）。脚本核对 USB 序列号、完整出厂备份校验以及芯片MAC；串口路径不是身份。
