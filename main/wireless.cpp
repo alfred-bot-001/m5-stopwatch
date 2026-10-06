@@ -43,6 +43,8 @@ static esp_netif_t *radio_netif=nullptr;
 #ifndef VIBE_RECEIVER
 static std::atomic<uint32_t> wifi_disconnects{0},wifi_attempts{0},wifi_timeouts{0},tcp_attempts{0};
 static std::atomic<int> wifi_reason{0},wifi_connect_error{0},tcp_error{0};
+static std::atomic<uint32_t> tcp_failure_run{0},tcp_failure_ms{0},tcp_recoveries{0};
+static std::atomic<int> tcp_disconnect_error{0};
 // Only the control worker calls the driver. The event loop publishes its latest
 // transition under guard; wifi_up is updated in the same critical section.
 static StationEvent station_event=StationEvent::none;
@@ -217,32 +219,55 @@ static void sender_audio(void*){
 }
 static void sender_control(void*){
  StationReconnect reconnect;uint32_t observed_sequence=0;
+ ControlLinkRecovery peer_health;
+ auto healthy=[&](){peer_health.healthy();tcp_failure_run=0;tcp_failure_ms=0;};
+ auto failed=[&](){
+  uint32_t now=now_ms();bool recover=peer_health.failed(now,wifi_up.load());
+  tcp_failure_run=peer_health.failures();tcp_failure_ms=peer_health.failure_ms(now);
+  if(!recover)return;
+  // Invalidate the old association immediately, including any delayed IP
+  // event, even if the driver's disconnect completion is itself missing.
+  portENTER_CRITICAL(&guard);
+  bool still_up=wifi_up.load();
+  if(still_up){
+   wifi_up=false;peer_usb=false;token=0;
+   station_event_gate.accept(StationEvent::disconnected);
+   station_event=StationEvent::disconnected;++station_event_sequence;
+  }
+  portEXIT_CRITICAL(&guard);
+  if(still_up){++tcp_recoveries;tcp_disconnect_error=esp_wifi_disconnect();}
+ };
  // The checked startup completed even if its STA_START event was lost.
  reconnect.event(StationEvent::started,now_ms());
  while(radio_running.load()){
   peer_usb=false;token=0;xQueueReset(controls);xQueueReset(audios);queue_fault=false;
   service_station(reconnect,observed_sequence);
-  if(!wifi_up){vTaskDelay(pdMS_TO_TICKS(100));continue;}
+  if(!wifi_up){healthy();vTaskDelay(pdMS_TO_TICKS(100));continue;}
   int fd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(fd<0){vTaskDelay(pdMS_TO_TICKS(100));continue;}
   if(!options(fd)){int error=errno;close(fd);radio_fail("control_options",ESP_FAIL,error);break;}
   auto remote=address(control_port,"192.168.7.1");
   ++tcp_attempts;
-  if(!connect_peer(fd,remote)){tcp_error=errno;close(fd);vTaskDelay(pdMS_TO_TICKS(250));continue;}
+  if(!connect_peer(fd,remote)){tcp_error=errno;close(fd);failed();vTaskDelay(pdMS_TO_TICKS(250));continue;}
   tcp_error=0;
   Ack ack;
-  if(!transfer(fd,&ack,sizeof(ack),false)||ack.magic_value!=magic||!ack.token){close(fd);continue;}
+  if(!transfer(fd,&ack,sizeof(ack),false)||ack.magic_value!=magic||!ack.token){close(fd);failed();vTaskDelay(pdMS_TO_TICKS(50));continue;}
   if(!radio_running.load()){close(fd);break;}
+  healthy(); // TCP connect alone does not demonstrate a functioning receiver.
   token=ack.token;seen=now_ms();peer_usb=ack.usb!=0;++connections;
+  bool control_failed=false;
   while(radio_running.load() && wifi_up && !queue_fault){
    Control p;
    if(xQueueReceive(controls,&p,pdMS_TO_TICKS(20))!=pdTRUE){portENTER_CRITICAL(&guard);p=state;portEXIT_CRITICAL(&guard);}
    p.token=token.load();
    // Release can race with report generation; never advertise speech with no Option.
    if(!(p.keys[0]&0x40))p.listening=0;
-   if(!transfer(fd,&p,sizeof(p),true)||!transfer(fd,&ack,sizeof(ack),false)||ack.magic_value!=magic||ack.token!=token.load())break;
+   if(!transfer(fd,&p,sizeof(p),true)||!transfer(fd,&ack,sizeof(ack),false)||ack.magic_value!=magic||ack.token!=token.load()){control_failed=true;break;}
+   healthy();
    seen=now_ms();peer_usb=ack.usb!=0;
   }
-  peer_usb=false;token=0;close(fd);vTaskDelay(pdMS_TO_TICKS(50));
+  peer_usb=false;token=0;close(fd);
+  if(control_failed && radio_running.load())failed();
+  vTaskDelay(pdMS_TO_TICKS(50));
  }
  peer_usb=false;token=0;
 }
@@ -373,18 +398,21 @@ extern "C" void wireless_status(char *out,size_t size){
  Control p;unsigned lost,over,under,buffered;
  portENTER_CRITICAL(&guard);p=state;lost=audio_buffer.lost;over=audio_buffer.overflow;under=audio_buffer.underflow;buffered=audio_buffer.count;portEXIT_CRITICAL(&guard);
  wireless_view_t view;wireless_view(&view);
- char wifi[384]{};
+ char wifi[512]{};
  if(radio_running.load()){
 #ifdef VIBE_RECEIVER
   wifi_sta_list_t stations{};esp_err_t error=esp_wifi_ap_get_sta_list(&stations);
-  snprintf(wifi,sizeof(wifi)," ap_stations=%d wifi_query=0x%x",error==ESP_OK?int(stations.num):-1,unsigned(error));
+  uint8_t mac[6]{},channel=0;wifi_second_chan_t secondary{};
+  esp_wifi_get_mac(WIFI_IF_AP,mac);esp_wifi_get_channel(&channel,&secondary);
+  snprintf(wifi,sizeof(wifi)," ap_stations=%d wifi_query=0x%x ap_mac=%02x%02x%02x%02x%02x%02x ch=%u",error==ESP_OK?int(stations.num):-1,unsigned(error),mac[0],mac[1],mac[2],mac[3],mac[4],mac[5],unsigned(channel));
 #else
   wifi_ap_record_t ap{};esp_err_t error=esp_wifi_sta_get_ap_info(&ap);
   esp_netif_ip_info_t ip{};esp_netif_get_ip_info(radio_netif,&ip);
   esp_netif_dhcp_status_t dhcp{};esp_netif_dhcpc_get_status(radio_netif,&dhcp);
-  snprintf(wifi,sizeof(wifi)," wifi_up=%d associated=%d rssi=%d wifi_query=0x%x net_up=%d ip=%08lx dhcp=%d wifi_attempts=%u wifi_disc=%u wifi_reason=%d wifi_connect_err=0x%x wifi_timeouts=%u tcp_attempts=%u tcp_errno=%d",
+  snprintf(wifi,sizeof(wifi)," wifi_up=%d associated=%d rssi=%d wifi_query=0x%x net_up=%d ip=%08lx dhcp=%d wifi_attempts=%u wifi_disc=%u wifi_reason=%d wifi_connect_err=0x%x wifi_timeouts=%u tcp_attempts=%u tcp_errno=%d tcp_fail=%u/%u tcp_recover=%u tcp_disc_err=0x%x bssid=%02x%02x%02x%02x%02x%02x ch=%u",
    int(wifi_up.load()),int(error==ESP_OK),error==ESP_OK?int(ap.rssi):0,unsigned(error),int(esp_netif_is_netif_up(radio_netif)),ip.ip.addr,int(dhcp),
-   unsigned(wifi_attempts.load()),unsigned(wifi_disconnects.load()),wifi_reason.load(),unsigned(wifi_connect_error.load()),unsigned(wifi_timeouts.load()),unsigned(tcp_attempts.load()),tcp_error.load());
+   unsigned(wifi_attempts.load()),unsigned(wifi_disconnects.load()),wifi_reason.load(),unsigned(wifi_connect_error.load()),unsigned(wifi_timeouts.load()),unsigned(tcp_attempts.load()),tcp_error.load(),
+   unsigned(tcp_failure_run.load()),unsigned(tcp_failure_ms.load()),unsigned(tcp_recoveries.load()),unsigned(tcp_disconnect_error.load()),ap.bssid[0],ap.bssid[1],ap.bssid[2],ap.bssid[3],ap.bssid[4],ap.bssid[5],unsigned(ap.primary));
 #endif
  }
  snprintf(out,size,"radio=%d host=%d sessions=%u audio_tx=%u audio_rx=%u tx_err=%u lost=%u over=%u under=%u buffered=%u remote_mv=%u remote_level=%u remote_listen=%u radio_init=%d radio_err=0x%x radio_stage=%s radio_errno=%d radio_stack_min=%u%s",

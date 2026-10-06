@@ -146,3 +146,17 @@ StopWatch v11 和接收器均已实现专用Wi-Fi控制与音频传输，协议/
 受控测试仅把精确匹配的 C480 临时置于 ROM，让 AP 停止约20秒，再用只读 MAC 命令及 watchdog reset 恢复原应用，没有在测试中写 Flash。连续记录到 StopWatch 的18条未关联状态；接收器复位命令结束后约5.9秒恢复 `radio=1 host=1 associated=1`，会话数2→3，StopWatch 运行时间连续增长、未重启。最终 `mic=0 listen=0 tcp_errno=0`。这验证了 AP 消失后的本次自动重连，不代表长时间闲置、无线键鼠实体行为、续航或距离已完成验收。
 
 重连后的接收器 CoreAudio 待机回归取得144,000样本，实际3.011秒，282次回调，全部数字静音；临时音频已删除。有效诊断区间USB preload仍为1000次/秒，无新增超过1500us间隔或短写，最大间隔1143us。
+
+### 快速拔插后的陈旧关联（2026-10-06）
+
+用户随后报告两台都拔插过后再次无法连接。现场先保留设备状态：C480 正常 USB 枚举，运行约27分钟，`host=1 radio=0 sessions=0 ap_stations=0`；StopWatch 接回 USB 后仍显示 SEARCHING，运行约10小时，说明拔线后电池仍让它运行。StopWatch 持续 `wifi_up=1 associated=1`，RSSI约−46dBm，静态IP和netif正常，但14秒内TCP尝试从4150增至4185，始终超时；Wi-Fi连接尝试及断线次数没有增长。这是旧策略只信任关联状态、持续重试TCP而不重新关联的实际失败现场。
+
+[ESP-IDF 5.5 官方说明](https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32s3/api-guides/wifi.html#wi-fi-beacon-timeout) 中的失联检测依赖 beacon/probe 超时。接收器短时重启、关联表清空，而 StopWatch 又收到同一热点的广播，与当前双方状态相容；没有抓取空口报文，不能据此确认底层丢失的具体帧。上次20秒ROM中断测试覆盖了较长的AP消失，不能代表快速实体断电重插也已通过。
+
+新增对控制协议的健康检查：Wi-Fi仍在线但连接或有效协议应答连续失败至少15秒、累计至少5次时，清除本地旧会话并调用 `esp_wifi_disconnect()`，交由既有退避策略重新关联；两次此类恢复至少间隔30秒。有效协议ACK清除失败窗口，socket资源不足不触发该处理；没有整机重启、Wi-Fi stop/start 或 NVS 清空。新增 `tcp_fail`、`tcp_recover`、`tcp_disc_err` 和双方热点 MAC/信道诊断。
+
+原生测试覆盖15秒边界、最少失败次数、健康应答清零、Wi-Fi已断开、30秒冷却及毫秒回绕，与已有站点重连测试一同严格编译通过。两端 ESP-IDF 构建和实际 ELF USB 描述符检查通过。
+
+两端最终刷写均通过三段哈希校验。用户保持 StopWatch 接 USB，实际快速拔插 C480；主机记录接收器 USB 消失后约2.8秒重新枚举，运行时间归零。现场再次出现同一热点下的矛盾状态：StopWatch `associated=1`，C480 `ap_stations=0`，双方均没有有效控制会话。持续失败约15秒后 `tcp_recover` 从0变1，`tcp_disc_err=0`，站点重新关联；约1秒后 StopWatch 恢复 `radio=1 host=1`，接收器随后的采样也恢复 `ap_stations=1 radio=1`。从接收器重新枚举到 StopWatch 恢复约13.5秒，StopWatch运行时间全程递增、未重启。
+
+用户起初反馈仍 SEARCHING，随后明确确认「连上了」，与日志中等待恢复的时间一致。双方热点身份核对为 `9c139e8ac481`、信道6；恢复后 `tcp_fail=0/0`、`mic=0 listen=0`。这次覆盖了真实快速拔插、陈旧关联的复现及自动恢复，而不只是刷机或软件重启后重新连接。长时间稳定性及历史黑屏故障仍需分别验证。

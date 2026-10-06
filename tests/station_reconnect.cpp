@@ -8,6 +8,37 @@ using Policy=wire::StationReconnect;
 using Action=Policy::Action;
 
 int main(){
+ // Short AP reboot regression: beacons/driver association remain up but no
+ // control ACK arrives. One bad packet never resets a healthy association.
+ wire::ControlLinkRecovery control;
+ assert(!control.failed(0,true));assert(!control.failed(100,true));
+ assert(!control.failed(200,true));assert(!control.failed(300,true));
+ assert(!control.failed(14999,true));assert(control.failed(15000,true));
+ assert(control.failures()==0 && control.failure_ms(15000)==0);
+ // A failed peer remains rate-limited after recovery, even across Wi-Fi down.
+ assert(!control.failed(15001,false));
+ for(uint32_t t=15250;t<45000;t+=250)assert(!control.failed(t,true));
+ assert(control.failed(45000,true));
+ // A valid ACK resets the failure window, rather than just a TCP handshake.
+ wire::ControlLinkRecovery intermittent;
+ for(uint32_t t=0;t<14000;t+=1000)assert(!intermittent.failed(t,true));
+ intermittent.healthy();
+ assert(!intermittent.failed(15000,true));assert(intermittent.failures()==1);
+ assert(intermittent.failure_ms(16000)==1000);
+ assert(!intermittent.failed(29999,true));
+ intermittent.healthy();assert(intermittent.failure_ms(40000)==0);
+ // At least five failed protocol exchanges, not one isolated long timeout.
+ wire::ControlLinkRecovery sparse;
+ assert(!sparse.failed(0,true));assert(!sparse.failed(60000,true));
+ assert(!sparse.failed(60001,true));assert(!sparse.failed(60002,true));
+ assert(sparse.failed(60003,true));
+ wire::ControlLinkRecovery offline;
+ for(uint32_t t=0;t<60000;t+=1000)assert(!offline.failed(t,false));
+ assert(offline.failures()==0 && offline.failure_ms(60000)==0);
+ wire::ControlLinkRecovery control_wrap;
+ assert(!control_wrap.failed(0xfffffff0u,true));
+ for(uint32_t t=0;t<3;++t)assert(!control_wrap.failed(t,true));
+ assert(!control_wrap.failed(14983,true));assert(control_wrap.failed(14984,true));
  // Event-loop ordering regression: CONNECTED's GOT_IP may be delivered only
  // after an already queued DISCONNECTED. It must not replace that mailbox
  // transition or leave the worker permanently "online" while unassociated.

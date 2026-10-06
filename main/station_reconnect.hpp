@@ -20,6 +20,31 @@ class StationEventGate {
   bool associated_ = false;
 };
 
+// Beacons can return after a short AP reboot before the station notices loss.
+// Driver association then looks healthy while the AP has forgotten this peer.
+// Only sustained control-protocol failure permits a bounded reassociation.
+class ControlLinkRecovery {
+ public:
+  static constexpr uint32_t failure_timeout_ms = 15000, cooldown_ms = 30000;
+  static constexpr unsigned minimum_failures = 5;
+  bool failed(uint32_t now, bool wifi_ready) {
+    if (!wifi_ready) { healthy(); return false; }
+    if (!failing_) { failing_ = true; failure_since_ = now; }
+    if (failures_ != UINT32_MAX) ++failures_;
+    if (uint32_t(now - failure_since_) < failure_timeout_ms
+        || failures_ < minimum_failures
+        || (recovered_ && uint32_t(now - recovered_at_) < cooldown_ms)) return false;
+    recovered_ = true; recovered_at_ = now; healthy();
+    return true;
+  }
+  void healthy() { failing_ = false; failures_ = 0; }
+  uint32_t failures() const { return failures_; }
+  uint32_t failure_ms(uint32_t now) const { return failing_ ? uint32_t(now - failure_since_) : 0; }
+ private:
+  bool failing_ = false, recovered_ = false;
+  uint32_t failure_since_ = 0, failures_ = 0, recovered_at_ = 0;
+};
+
 // Worker-owned policy: no driver calls or waiting in the Wi-Fi event callback.
 // A missing completion event must not leave one connect attempt pending forever.
 class StationReconnect {

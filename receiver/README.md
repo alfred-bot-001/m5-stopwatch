@@ -27,6 +27,8 @@
 
 排查 `SEARCHING` 时，先分别看两条连接：C480 的 `host=1` 表示电脑 USB 已连接，`radio=1` 表示与 StopWatch 的控制会话有效。`ap_stations=1` 只证明有 Wi-Fi 站点关联，不等于控制会话已建立。StopWatch 的 `associated`、`wifi_up`、`wifi_reason`、`wifi_attempts`、`wifi_connect_err`、`wifi_timeouts` 和 `tcp_errno` 用于区分无线关联、静态 IP 与控制连接阶段；断线原因和错误计数可能保留上一次失败，需结合当前状态及计数变化查看。
 
+若 StopWatch 的 `associated=1`，接收器却持续 `ap_stations=0`，且控制连接反复超时，可能是接收器快速重启后留下的旧关联。sender 的 `tcp_fail=次数/毫秒` 记录连续控制失败，`tcp_recover` 记录为恢复通信主动重新关联的次数，`tcp_disc_err` 是最近一次断开请求的返回值。`bssid` 与接收器 `ap_mac` 应一致，`ch` 为当前信道；用实际读数确认热点身份，不能把芯片基础 MAC 直接当成 AP MAC。
+
 无线时开启 Wi-Fi，续航、最大距离和抗干扰能力需实测，不能沿用有线待机的功耗估计。原始音频不压缩，避免编解码损耗；无线延迟和丢包仍可能影响语音。
 
 ## 构建和恢复
