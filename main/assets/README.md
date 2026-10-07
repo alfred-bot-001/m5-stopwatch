@@ -1,0 +1,9 @@
+# Orange character sprite
+
+`orange_character.png` is the user's supplied orange character, extracted with the built-in imagegen tool. It preserves the orange texture and white eyes, with transparent surroundings and no pupils. Firmware scales and decodes it once at startup; the black pupils are drawn separately and move gently only while microphone input contains sound.
+
+The source is 1254×1254 RGBA. The two measured white-eye centres are (373.1286, 386.8764) and (881.8142, 387.0029). `character_asset.hpp` scales these to the 320×320 cached sprite. Pupil radius and displacement leave the pupils inside the white eyes.
+
+Final image-edit prompt:
+
+> Use case: background-extraction / precise-object-edit. Image 1 is the edit target: the exact orange textured frog-like blob mascot with two eyes. Create a clean sprite asset for a small AMOLED device. Preserve the original orange silhouette, the two rounded bumps on top, the wider rounded bottom, original mottled soft clay/watercolor texture and orange color, front-facing composition, and original proportions exactly. Remove the outer black background and the off-white rounded rectangle card completely, output actual transparent alpha around the mascot. Keep both off-white circular eyeballs in their original positions, but remove only the two black pupils and fill those regions seamlessly with the same off-white eye color: firmware will draw and animate black pupils separately. Keep eyes as plain solid off-white circles, no outlines, no inner shadows, no pupil remnants. No mouth, no arms, no accessories, no border, no text, no shadow outside the mascot. Crop composition tightly with a small transparent margin around the full mascot; center it in a square image, mascot about 88% of width. This is a faithful extraction and pupil removal, not a redesign.

@@ -6,6 +6,7 @@
 #include "gestures.hpp"
 #include "diagnostics.hpp"
 #include "display_idle.hpp"
+#include "character.hpp"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -41,6 +42,7 @@ static bool previous_diagnostic_valid=false;
 static uint32_t boot_reset_raw=0,boot_strap_raw=0;
 static bool led_config_ok=false;
 static bool mic_ok=false;
+static bool character_ready=false;
 static bool wireless_safe_boot=false;
 static TaskHandle_t main_task=nullptr;
 static std::atomic<bool> listen_requested{false},capture_enabled{false},mic_running{false};
@@ -147,18 +149,7 @@ extern "C" void vibe_status(char *out,size_t size) {
   pmic_events.load(),pmic_event_ms.load(),pmic_hold_ms.load(),pmic_hold_max_ms.load(),maintenance_intent.load(),unsigned(boot_reset_raw),unsigned(boot_strap_raw),unsigned(vibe_usb_lifecycle()),int(bool(REG_READ(SYSTEM_PERIP_CLK_EN1_REG)&SYSTEM_USB_DEVICE_CLK_EN)),
   unsigned(previous_diagnostic_valid),unsigned(previous_diagnostic.uptime_ms),unsigned(previous_diagnostic.intent),unsigned(previous_diagnostic.pmic_state),unsigned(previous_diagnostic.flags),unsigned(previous_diagnostic.events),unsigned(previous_diagnostic.last_event_ms),unsigned(previous_diagnostic.held_ms),unsigned(previous_diagnostic.max_held_ms),unsigned(previous_diagnostic.reset_raw),unsigned(previous_diagnostic.strap_raw),unsigned(previous_diagnostic.usb_events));
  size_t used=strlen(out);if(used && out[used-1]=='\n')out[--used]=0;
- char radio[768];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),radio);
-}
-static void draw_microphone(M5Canvas &canvas,uint16_t color,int radius,bool muted){
- canvas.fillSprite(TFT_BLACK);
- canvas.drawCircle(180,180,radius,color);canvas.drawCircle(180,180,radius-1,color);
- canvas.fillRoundRect(140,80,80,132,40,color);
- canvas.fillRoundRect(116,145,128,100,55,color);
- canvas.fillRoundRect(126,134,108,99,45,TFT_BLACK);
- canvas.fillRoundRect(140,80,80,132,40,color);
- canvas.fillRoundRect(175,236,10,40,5,color);
- canvas.fillRoundRect(147,274,66,10,5,color);
- if(muted)canvas.drawWideLine(118,97,243,278,8,color);
+ char radio[768];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),radio);
 }
 extern "C" void app_main() {
  main_task=xTaskGetCurrentTaskHandle();
@@ -198,14 +189,15 @@ extern "C" void app_main() {
  M5Canvas canvas(&M5.Display);canvas.setColorDepth(16);canvas.setPsram(true);
  assert(canvas.createSprite(360,360));
  screen_lock=xSemaphoreCreateMutex();assert(screen_lock);screen=&canvas;
+ CharacterRenderer character;character_ready=character.begin();
+ if(!character_ready)++errors;
  // Establish a visible recovery path before starting optional radio work.
- draw_microphone(canvas,TFT_DARKCYAN,136,true);
+ character.draw(canvas,false,false,mic_ok);
  canvas.setTextDatum(middle_center);canvas.setTextColor(TFT_DARKGREY,TFT_BLACK);
  canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(wireless_safe_boot?"USB SAFE / WIFI OFF":"USB / STARTING WIFI",180,318);
  canvas.pushSprite((M5.Display.width()-360)/2,(M5.Display.height()-360)/2);
  vibe_usb_init();if(!wireless_safe_boot)wireless_init();
  DisplayIdle display_idle(uint32_t(esp_timer_get_time()/1000));
- float envelope=0;
  uint32_t last_power_read=0,last_draw=0;unsigned attempted_session=0;Swipe swipe;PowerButtonHistory power_buttons;
  for(;;){
   uint32_t now=esp_timer_get_time()/1000;
@@ -256,6 +248,7 @@ extern "C" void app_main() {
    save_diagnostic(esp_timer_get_time()/1000);
   }
   bool was_awake=display_idle.awake();
+  character.update(now,listen_requested.load() && mic_running.load(),level.load());
   bool awake=display_idle.update(now,display_activity.exchange(false) || listen_requested.load());
   display_idle_ms=display_idle.idle_ms(now);
   if(!awake){
@@ -265,18 +258,11 @@ extern "C" void app_main() {
    vTaskDelay(pdMS_TO_TICKS(8));continue;
   }
   bool waking=!was_awake;
-  float signal=std::fmin(1.f,std::fmax(0.f,(level.load()-0.006f)*18.f));
-  envelope=std::fmax(signal,envelope*0.84f);
-  float t=esp_timer_get_time()/1000000.0f;bool held=yellow.load();
+  bool held=yellow.load();
   if(!waking && uint32_t(now-last_draw)<(held?33u:100u)){vTaskDelay(pdMS_TO_TICKS(8));continue;}
   last_draw=now;
-  float pulse=0.5f+0.5f*sinf(t*(held?9.f:13.f));
-  float light=held?0.55f+0.45f*pulse:0.55f+0.45f*envelope*pulse;
-  uint16_t color=canvas.color565((held?255:40)*light,(held?180:230)*light,(held?35:200)*light);
-  if(!mic_ok)color=TFT_RED;
   xSemaphoreTake(screen_lock,portMAX_DELAY);
-  int radius=136+int((held?pulse:envelope*pulse)*15);
-  draw_microphone(canvas,color,radius,!listen_requested.load());
+  character.draw(canvas,held,listen_requested.load() && mic_running.load(),mic_ok);
   wireless_view_t radio;wireless_view(&radio);char footer[48];
   if(wireless_safe_boot)snprintf(footer,sizeof(footer),"USB SAFE / WIFI OFF");
   else if(radio.error!=ESP_OK)snprintf(footer,sizeof(footer),"USB / WIFI ERR %X",unsigned(radio.error));
