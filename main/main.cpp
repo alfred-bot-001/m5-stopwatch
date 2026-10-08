@@ -8,6 +8,7 @@
 #include "display_idle.hpp"
 #include "character.hpp"
 #include "pet_motion.hpp"
+#include "power_key.hpp"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -42,6 +43,7 @@ static DiagnosticSnapshot previous_diagnostic{};
 static bool previous_diagnostic_valid=false;
 static uint32_t boot_reset_raw=0,boot_strap_raw=0;
 static bool led_config_ok=false;
+static bool power_key_guard_ok=false;
 static bool mic_ok=false;
 static bool character_ready=false;
 static std::atomic<bool> imu_ready{false};
@@ -154,6 +156,7 @@ extern "C" void vibe_status(char *out,size_t size) {
   pmic_events.load(),pmic_event_ms.load(),pmic_hold_ms.load(),pmic_hold_max_ms.load(),maintenance_intent.load(),unsigned(boot_reset_raw),unsigned(boot_strap_raw),unsigned(vibe_usb_lifecycle()),int(bool(REG_READ(SYSTEM_PERIP_CLK_EN1_REG)&SYSTEM_USB_DEVICE_CLK_EN)),
   unsigned(previous_diagnostic_valid),unsigned(previous_diagnostic.uptime_ms),unsigned(previous_diagnostic.intent),unsigned(previous_diagnostic.pmic_state),unsigned(previous_diagnostic.flags),unsigned(previous_diagnostic.events),unsigned(previous_diagnostic.last_event_ms),unsigned(previous_diagnostic.held_ms),unsigned(previous_diagnostic.max_held_ms),unsigned(previous_diagnostic.reset_raw),unsigned(previous_diagnostic.strap_raw),unsigned(previous_diagnostic.usb_events));
  size_t used=strlen(out);if(used && out[used-1]=='\n')out[--used]=0;
+ snprintf(out+used,size-used," key_guard=%d",int(power_key_guard_ok));used=strlen(out);
  char radio[768];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d imu=%d imu_samples=%u imu_fail=%u accel=%d,%d,%d pet=%d,%d hits=%u dizzy=%d imu_us=%u render_us=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),int(imu_ready.load()),imu_samples.load(),imu_failures.load(),imu_ax.load(),imu_ay.load(),imu_az.load(),pet_x.load(),pet_y.load(),pet_hits.load(),pet_dizzy.load(),imu_read_us.load(),pet_render_us.load(),radio);
 }
 extern "C" void app_main() {
@@ -183,6 +186,18 @@ extern "C" void app_main() {
   led_config_ok=power_after==(power_before & ~0x10);
   pmic_power=power_after;
  }
+ // Apply the reversible guard once at boot, only to the documented register
+ // map. Retain double-click power-off and the hardware download escape hatch.
+ uint8_t key_before=0,key_after=0;
+ if(id[0]==0x50 && id[1]==0x20 && id[2]==0x05 && (id[3]==0x06 || id[3]==0x53)
+    && pmic.readRegister(0x49,&key_before,1)){
+  const uint8_t guarded=guarded_power_key_config(key_before);
+  if((key_before==guarded || pmic.writeRegister8(0x49,guarded))
+     && pmic.readRegister(0x49,&key_after,1)){
+   pmic_config=key_after;power_key_guard_ok=key_after==guarded;
+  }
+ }
+ if(!power_key_guard_ok)++errors;
  gpio_input_enable(GPIO_NUM_0);
  M5.Display.setBrightness(screen_brightness);M5.Display.fillScreen(TFT_BLACK);
  auto mc=M5.Mic.config();mc.sample_rate=48000;mc.over_sampling=1;mc.magnification=8;mc.task_priority=5;mc.task_pinned_core=1;M5.Mic.config(mc);

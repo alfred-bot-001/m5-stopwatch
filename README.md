@@ -4,6 +4,7 @@ M5Stack StopWatch C152 的 USB 麦克风、双键键盘和触摸滚轮固件，�
 
 - 黄色左键：按住开启麦克风，同时保持右 Option（USB Right Alt）；松开关闭采集并释放按键。
 - 蓝色键：Enter。两键同时按是 Option+Enter；长按 Enter 的重复行为由电脑决定。
+- 红色电源键：运行本固件后关闭单击复位，长按下载门槛由原厂2秒延长到4秒；保留双击关机，关机后的开机操作遵循原厂说明。配置由 M5PM1 执行，只修改可逆的按键设置，不启用下载锁。诊断 `key_guard=1` 表示启动时写入并读回成功，出厂配置 `pm_cfg=2a` 会变为 `3b`。这减少短暂误碰，但持续按住4秒仍会进入下载模式。
 - 麦克风：内置 ES8311，48 kHz / 16 bit / 单声道 USB Audio。未按黄色键时停止 I2S 采集，关闭 ADC 模拟电路、清空缓存，USB 音频接口保持连接并输出静音。v11 启用 Wi-Fi 连接配套接收器，不启用蓝牙。芯片重新启动需要时间，特别是首次冷启动可能约一秒，按住后稍等再说话。
 - 屏幕左右滑：发送左/右方向键，移动文字光标；每滑动约 24 屏幕像素一步。若同时按黄色键，电脑会收到 Option+方向键。
 - 屏幕上下滑：发送鼠标滚轮，上滑为正向滚轮、下滑为反向；实际页面方向受 macOS 的「自然滚动」设置影响。手势锁定首次明确的横/纵方向，抬手后重新判定；轻点和小幅抖动不触发。
@@ -59,6 +60,8 @@ clang++ -std=c++17 -Wall -Wextra -Werror tests/display_idle.cpp -o /tmp/stopwatc
 /tmp/stopwatch-display-idle-test
 clang++ -std=c++17 -Wall -Wextra -Werror tests/pet_motion.cpp -o /tmp/stopwatch-pet-test
 /tmp/stopwatch-pet-test
+clang++ -std=c++17 -Wall -Wextra -Werror tests/power_key.cpp -o /tmp/stopwatch-power-key-test
+/tmp/stopwatch-power-key-test
 python3 -B tests/diagnose.py
 # 在 ESP-IDF Python 环境中（需要 pyelftools）：
 python tests/usb_descriptors.py build/stopwatch_vibe.elf
