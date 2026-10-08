@@ -1,9 +1,10 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#include "pet_layout.h"
 
 struct PetMotionView {
- float x=180.f,y=155.f,angle=0.f,squash=0.f,dizzy=0.f,impact=0.f;
+ float x=PET_SCREEN_CENTER,y=PET_SCREEN_CENTER,angle=0.f,squash=0.f,dizzy=0.f,impact=0.f;
  bool active=false;
 };
 
@@ -12,7 +13,9 @@ struct PetMotionView {
 // user activity. Only fresh physical movement from sample() can wake the screen.
 class PetMotion {
 public:
- static constexpr float left=110.f,right=250.f,top=96.f,bottom=202.f;
+ static constexpr float center_x=PET_SCREEN_CENTER,center_y=PET_SCREEN_CENTER;
+ static constexpr float radius=PET_SCREEN_RADIUS-PET_BODY_RADIUS;
+ static_assert(radius>0.f,"The pet must fit inside the circular screen");
 
  bool sample(uint32_t now,float ax,float ay,float az,float gyro_speed) {
   if(!std::isfinite(ax)||!std::isfinite(ay)||!std::isfinite(az)||!std::isfinite(gyro_speed))return false;
@@ -46,8 +49,7 @@ public:
    vx_=limit((vx_+(fresh?force_x_:0.f)*dt)*std::exp(-2.1f*dt),-380.f,380.f);
    vy_=limit((vy_+(fresh?force_y_:0.f)*dt)*std::exp(-2.1f*dt),-380.f,380.f);
    view_.x+=vx_*dt;view_.y+=vy_*dt;
-   collide(view_.x,vx_,left,right,now);
-   collide(view_.y,vy_,top,bottom,now);
+   collide(now,dt);
    view_.squash*=std::exp(-dt/0.16f);view_.impact*=std::exp(-dt/0.40f);
    if(uint32_t(now-last_hit_)>700)view_.dizzy=std::fmax(0.f,view_.dizzy-dt*0.13f);
    phase_=std::fmod(phase_+dt*5.f,6.283185307f);
@@ -71,13 +73,24 @@ private:
  float anchor_x_=0.f,anchor_y_=0.f,anchor_z_=0.f,phase_=0.f;
  static float limit(float value,float low,float high){return std::fmax(low,std::fmin(high,value));}
  static float deadzone(float value){return std::fabs(value)<0.035f?0.f:value-std::copysign(0.035f,value);}
- void collide(float &position,float &velocity,float low,float high,uint32_t now) {
-  if(position>=low && position<=high)return;
-  const bool lower=position<low;position=lower?low:high;
-  if((lower && velocity>=0.f)||(!lower && velocity<=0.f))return;
-  const float speed=std::fabs(velocity);
-  velocity=speed<35.f?0.f:-velocity*0.64f;
-  // The tiny force needed to rest against a wall is not a new collision.
+ void collide(uint32_t now,float dt) {
+  const float dx=view_.x-center_x,dy=view_.y-center_y;
+  const float distance_squared=dx*dx+dy*dy;
+  if(distance_squared<=radius*radius)return;
+  const float inverse_distance=1.f/std::sqrt(distance_squared);
+  const float nx=dx*inverse_distance,ny=dy*inverse_distance;
+  view_.x=center_x+nx*radius;view_.y=center_y+ny*radius;
+  const float speed=vx_*nx+vy_*ny;
+  if(speed<=0.f)return; // Correct position without bouncing an inward velocity.
+  const float tangent_x=vx_-speed*nx,tangent_y=vy_-speed*ny;
+  // Only the outward normal component rebounds. Friction lets a fixed tilt
+  // settle at the bottom of its circular arc without suppressing edge sliding.
+  const float tangent_drag=std::exp(-3.f*dt);
+  const float normal_speed=speed<35.f?0.f:-speed*0.64f;
+  vx_=tangent_x*tangent_drag+normal_speed*nx;
+  vy_=tangent_y*tangent_drag+normal_speed*ny;
+  // Resting contact and the small correction for tangential travel around a
+  // curved wall are not new impacts; do not count them as dizzy collisions.
   if(speed<45.f)return;
   ++hits_;last_hit_=now;
   view_.squash=std::fmax(view_.squash,limit(speed/230.f,0.f,1.f));

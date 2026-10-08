@@ -2,6 +2,7 @@
 
 #include <M5Unified.h>
 #include <cmath>
+#include <cstring>
 #include "character_asset.hpp"
 #include "pet_motion.hpp"
 
@@ -43,25 +44,34 @@ public:
   if(amplitude_==0.f && std::fabs(x_)<0.01f && std::fabs(y_)<0.01f){x_=y_=phase_=0.f;}
  }
 
- void draw(M5Canvas &canvas,bool held,bool listening,bool mic_ok,const PetMotionView &motion) {
-  canvas.fillSprite(TFT_BLACK);
+ void draw(M5Canvas &canvas,bool,bool,bool,const PetMotionView &motion) {
+  // Both final and cached sprites are native RGB565. Direct buffer copies avoid
+  // the library's per-pixel PSRAM fallback; no decoding occurs during a frame.
+  if(canvas.getColorDepth()==16 && canvas.getBuffer())
+   std::memset(canvas.getBuffer(),0,size_t(canvas.width())*canvas.height()*sizeof(uint16_t));
+  else canvas.fillSprite(TFT_BLACK);
   const float dizziness=bounded(motion.dizzy,0.f,1.f);
-  const float impact=bounded(motion.impact,0.f,1.f);
-  const uint16_t fence=canvas.color565(uint8_t(25.f+impact*21.f),uint8_t(50.f+impact*35.f),uint8_t(51.f+impact*24.f));
   // The frame moves as one sprite, so body, eyes, and impact squashing agree.
-  canvas.setClipRect(14,14,332,282);
   if(frame_ready_){
-   frame_.fillSprite(TFT_BLACK);
-   if(cached_)background_.pushSprite(&frame_,0,0);
-   else draw_fallback(frame_,0,0);
+   if(cached_)std::memcpy(frame_.getBuffer(),background_.getBuffer(),
+    size_t(character_asset::width)*character_asset::height*sizeof(uint16_t));
+   else{frame_.fillSprite(TFT_BLACK);draw_fallback(frame_,0,0);}
    eyes(frame_,0.f,0.f,dizziness);
    const float squash=bounded(motion.squash,0.f,1.f);
    const float angle=bounded(motion.angle,-12.f,12.f);
    // A whole-sprite AA transform blends every pixel through an ARGB buffer.
    // Keep antialiasing on the tiny pupils, and use cheap copies when upright.
    if(std::fabs(angle)<0.3f && squash<0.008f){
-    frame_.pushSprite(&canvas,int(std::lround(motion.x-character_asset::width*0.5f)),
-     int(std::lround(motion.y-character_asset::height*0.5f)),TFT_BLACK);
+    const int left=int(std::lround(motion.x-character_asset::width*0.5f));
+    const int top=int(std::lround(motion.y-character_asset::height*0.5f));
+    if(left>=0 && top>=0 && left+character_asset::width<=canvas.width()
+     && top+character_asset::height<=canvas.height() && canvas.getColorDepth()==16){
+     auto *dst=static_cast<uint16_t*>(canvas.getBuffer());
+     const auto *src=static_cast<const uint16_t*>(frame_.getBuffer());
+     for(int row=0;row<character_asset::height;++row)
+      std::memcpy(dst+size_t(top+row)*canvas.width()+left,
+       src+size_t(row)*character_asset::width,character_asset::width*sizeof(uint16_t));
+    }else frame_.pushSprite(&canvas,left,top,TFT_BLACK);
    }else{
     frame_.pushRotateZoom(&canvas,motion.x,motion.y,angle,
      1.f+0.06f*squash,1.f-0.11f*squash,TFT_BLACK);
@@ -72,13 +82,6 @@ public:
    draw_fallback(canvas,x,y);eyes(canvas,float(x),float(y),dizziness);
   }
   if(dizziness>0.03f)stars(canvas,motion,dizziness);
-  canvas.clearClipRect();
-  mask_corners(canvas);
-  canvas.drawRoundRect(12,12,336,286,24,fence);
-  // A quiet dot preserves yellow-key feedback without tinting the character.
-  const uint16_t dot=!mic_ok?TFT_RED:(held?canvas.color565(255,181,54)
-   :(listening?TFT_CYAN:canvas.color565(32,79,76)));
-  canvas.drawSpot(180,304,3.0f+amplitude_*0.7f,dot);
  }
 
 private:
@@ -89,16 +92,6 @@ private:
 
  static float bounded(float value,float low,float high) {
   return std::isfinite(value)?std::fmin(high,std::fmax(low,value)):low;
- }
-
- static void mask_corners(M5Canvas &canvas) {
-  // The rectangular graphics clip protects the footer; this tiny mask also
-  // keeps the moving sprite inside the arena's rounded inner corners.
-  for(int y=1;y<=22;++y)for(int x=1;x<=22;++x){
-   if(x*x+y*y<=22*22)continue;
-   canvas.drawPixel(36-x,36-y,TFT_BLACK);canvas.drawPixel(323+x,36-y,TFT_BLACK);
-   canvas.drawPixel(36-x,273+y,TFT_BLACK);canvas.drawPixel(323+x,273+y,TFT_BLACK);
-  }
  }
 
  void eyes(M5Canvas &canvas,float x,float y,float dizziness) const {
@@ -126,16 +119,23 @@ private:
 
  void stars(M5Canvas &canvas,const PetMotionView &motion,float amount) const {
   const float angle=bounded(motion.angle,-12.f,12.f)*0.0174532925f;
-  const float head_x=motion.x+std::sin(angle)*62.f;
-  const float head_y=motion.y-std::cos(angle)*62.f;
+  const float head_x=motion.x+std::sin(angle)*82.6667f;
+  const float head_y=motion.y-std::cos(angle)*82.6667f;
   const uint16_t color=canvas.color565(uint8_t(238.f*amount),uint8_t(193.f*amount),uint8_t(79.f*amount));
   for(int i=0;i<3;++i){
    const float phase=decoration_phase_+i*2.0943951f;
-   const int x=int(std::lround(bounded(head_x+std::cos(phase)*40.f,21.f,339.f)));
-   const int y=int(std::lround(bounded(head_y+std::sin(phase)*9.f,21.f,289.f)));
-   canvas.drawWideLine(x-3,y,x+3,y,0.6f,color);
-   canvas.drawWideLine(x,y-3,x,y+3,0.6f,color);
-   canvas.drawSpot(x,y,1.0f,color);
+   float sx=head_x+std::cos(phase)*53.3333f,sy=head_y+std::sin(phase)*12.f;
+   const float dx=sx-PET_SCREEN_CENTER,dy=sy-PET_SCREEN_CENTER;
+   constexpr float star_bound=PET_SCREEN_RADIUS-5.f;
+   const float r2=dx*dx+dy*dy;
+   if(r2>star_bound*star_bound){
+    const float scale=star_bound/std::sqrt(r2);
+    sx=PET_SCREEN_CENTER+dx*scale;sy=PET_SCREEN_CENTER+dy*scale;
+   }
+   const int x=int(std::lround(sx)),y=int(std::lround(sy));
+   canvas.drawWideLine(x-4,y,x+4,y,0.6f,color);
+   canvas.drawWideLine(x,y-4,x,y+4,0.6f,color);
+   canvas.drawSpot(x,y,1.3333f,color);
   }
  }
 

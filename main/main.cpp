@@ -9,6 +9,7 @@
 #include "character.hpp"
 #include "pet_motion.hpp"
 #include "power_key.hpp"
+#include "pet_layout.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -49,7 +50,7 @@ static bool character_ready=false;
 static std::atomic<bool> imu_ready{false};
 static std::atomic<unsigned> imu_samples{0},imu_failures{0},pet_hits{0};
 static std::atomic<unsigned> imu_read_us{0},pet_render_us{0};
-static std::atomic<int> imu_ax{0},imu_ay{0},imu_az{0},pet_x{180},pet_y{155},pet_dizzy{0};
+static std::atomic<int> imu_ax{0},imu_ay{0},imu_az{0},pet_x{233},pet_y{233},pet_dizzy{0};
 static bool wireless_safe_boot=false;
 static TaskHandle_t main_task=nullptr;
 static std::atomic<bool> listen_requested{false},capture_enabled{false},mic_running{false};
@@ -61,6 +62,29 @@ static std::atomic<uint32_t> display_idle_ms{0};
 static QueueHandle_t reports,cursor_events,wheel_events;
 static SemaphoreHandle_t screen_lock;
 static M5Canvas *screen=nullptr;
+static void push_pet_frame(M5Canvas &canvas,const PetMotionView &pet,bool footer_at_top,bool full) {
+ static float previous_x=PET_SCREEN_CENTER,previous_y=PET_SCREEN_CENTER;
+ static bool previous_footer_at_top=false;
+ if(full){M5.Display.clearClipRect();canvas.pushSprite(0,0);}
+ else {
+  // Erase the last pose and paint the new one without sending all 466² pixels
+  // over SPI. The full framebuffer remains available for diagnostic capture.
+  constexpr int margin=int(PET_BODY_RADIUS)+3;
+  const int left=int(std::floor(std::fmin(previous_x,pet.x)))-margin;
+  const int top=int(std::floor(std::fmin(previous_y,pet.y)))-margin;
+  const int right=int(std::ceil(std::fmax(previous_x,pet.x)))+margin;
+  const int bottom=int(std::ceil(std::fmax(previous_y,pet.y)))+margin;
+  // Each push ends its own transaction so the AMOLED driver does not merge
+  // the distant pet/footer regions into one nearly full-screen transfer.
+  M5.Display.setClipRect(left,top,right-left+1,bottom-top+1);canvas.pushSprite(0,0);
+  M5.Display.setClipRect(0,footer_at_top?22:404,PET_SCREEN_SIZE,44);canvas.pushSprite(0,0);
+  if(previous_footer_at_top!=footer_at_top){
+   M5.Display.setClipRect(0,previous_footer_at_top?22:404,PET_SCREEN_SIZE,44);canvas.pushSprite(0,0);
+  }
+  M5.Display.clearClipRect();
+ }
+ previous_x=pet.x;previous_y=pet.y;previous_footer_at_top=footer_at_top;
+}
 static void save_diagnostic(uint32_t now) {
  portENTER_CRITICAL(&diagnostic_lock);
  DiagnosticSnapshot value{0,0,now,
@@ -74,7 +98,7 @@ static void save_diagnostic(uint32_t now) {
 extern "C" void vibe_note_boot_intent(){maintenance_intent=1;save_diagnostic(esp_timer_get_time()/1000);}
 extern "C" uint8_t *vibe_snapshot(size_t *size) {
  if(!screen || !screen_lock)return nullptr;
- *size=360*360*2;auto *result=static_cast<uint8_t*>(malloc(*size));
+ *size=PET_SCREEN_SIZE*PET_SCREEN_SIZE*2;auto *result=static_cast<uint8_t*>(malloc(*size));
  if(result){xSemaphoreTake(screen_lock,portMAX_DELAY);memcpy(result,screen->getBuffer(),*size);xSemaphoreGive(screen_lock);}
  return result;
 }
@@ -207,7 +231,7 @@ extern "C" void app_main() {
  // Begin() restores it on the first press; end() powers down the ADC thereafter.
  if(mic_ok && !M5.getIOExpander(0).digitalWrite(m5::M5IOE1_Class::gpio3,false)){mic_ok=false;++errors;}
  M5Canvas canvas(&M5.Display);canvas.setColorDepth(16);canvas.setPsram(true);
- assert(canvas.createSprite(360,360));
+ assert(canvas.createSprite(PET_SCREEN_SIZE,PET_SCREEN_SIZE));
  screen_lock=xSemaphoreCreateMutex();assert(screen_lock);screen=&canvas;
  CharacterRenderer character;character_ready=character.begin();
  PetMotion pet;
@@ -215,8 +239,8 @@ extern "C" void app_main() {
  // Establish a visible recovery path before starting optional radio work.
  character.draw(canvas,false,false,mic_ok,pet.view());
  canvas.setTextDatum(middle_center);canvas.setTextColor(TFT_DARKGREY,TFT_BLACK);
- canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(wireless_safe_boot?"USB SAFE / WIFI OFF":"USB / STARTING WIFI",180,318);
- canvas.pushSprite((M5.Display.width()-360)/2,(M5.Display.height()-360)/2);
+ canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(wireless_safe_boot?"USB SAFE / WIFI OFF":"USB / STARTING WIFI",PET_SCREEN_SIZE/2,432);
+ canvas.pushSprite(0,0);
  vibe_usb_init();if(!wireless_safe_boot)wireless_init();
  // BMI270 uploads its configuration at begin(). Keep it after the recovery
  // frame and USB startup, and never retry initialization in the input loop.
@@ -315,8 +339,15 @@ extern "C" void app_main() {
   else if(radio.error!=ESP_OK)snprintf(footer,sizeof(footer),"USB / WIFI ERR %X",unsigned(radio.error));
   else snprintf(footer,sizeof(footer),"%s",wireless_ready()?"WIRELESS":(radio.initialized?"USB / SEARCHING":"USB / STARTING WIFI"));
   canvas.setTextDatum(middle_center);canvas.setTextColor(radio.error!=ESP_OK?TFT_ORANGE:(wireless_ready()?TFT_CYAN:TFT_DARKGREY),TFT_BLACK);
-  canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(footer,180,318);
-  canvas.pushSprite((M5.Display.width()-360)/2,(M5.Display.height()-360)/2);
+  // Keep connection/PTT feedback opposite the pet when it reaches the lower
+  // rim. There is no footer wall: the pet follows the full circular panel.
+  const bool footer_at_top=pet_view.y>PET_SCREEN_CENTER+30.f;
+  const int footer_y=footer_at_top?34:432,dot_y=footer_at_top?52:414;
+  canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(footer,PET_SCREEN_SIZE/2,footer_y);
+  const uint16_t dot=!mic_ok?TFT_RED:(held?canvas.color565(255,181,54)
+   :(listen_requested.load()&&mic_running.load()?TFT_CYAN:canvas.color565(32,79,76)));
+  canvas.drawSpot(PET_SCREEN_CENTER,dot_y,3.f,dot);
+  push_pet_frame(canvas,pet_view,footer_at_top,waking);
   pet_render_us=unsigned(esp_timer_get_time()-render_start);
   // Restore the saved level explicitly: setBrightness(0) also changes the
   // library's remembered brightness, so wakeup() alone would stay dark.

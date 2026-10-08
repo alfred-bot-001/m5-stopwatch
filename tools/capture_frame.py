@@ -12,7 +12,7 @@ with serial.Serial(port.device,115200,timeout=3) as s:
   line=s.readline()
   if line.startswith(b'FRAME '):break
  else:raise RuntimeError('No frame header')
- _,w,h,n=line.split();w,h,n=map(int,(w,h,n));assert n==w*h*2 and n<=360*360*2
+ _,w,h,n=line.split();w,h,n=map(int,(w,h,n));assert n==w*h*2 and 0<w<=466 and 0<h<=466
  raw=s.read(n);assert len(raw)==n
 pixels=bytearray()
 for y in range(h):

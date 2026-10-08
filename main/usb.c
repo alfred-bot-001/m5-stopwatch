@@ -1,6 +1,9 @@
 // USB descriptor templates and UAC control layout: TinyUSB, MIT License.
 #include "tusb.h"
 #include "vibe.h"
+#ifndef VIBE_RECEIVER
+#include "pet_layout.h"
+#endif
 #include "maintenance.h"
 #include "esp_private/usb_phy.h"
 #include "freertos/FreeRTOS.h"
@@ -203,7 +206,7 @@ static void control_task(void *arg) {
 #ifdef VIBE_RECEIVER
      "FRAME 320 240 %u\n",(unsigned)snap_size
 #else
-     "FRAME 360 360 %u\n",(unsigned)snap_size
+     "FRAME %u %u %u\n",(unsigned)PET_SCREEN_SIZE,(unsigned)PET_SCREEN_SIZE,(unsigned)snap_size
 #endif
 );tud_cdc_write(h,n);tud_cdc_write_flush();}}
    maintenance_action_t action=maintenance_byte(&maintenance,c,pdTICKS_TO_MS(xTaskGetTickCount()));

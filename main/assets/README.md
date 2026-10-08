@@ -2,7 +2,7 @@
 
 `orange_character.png` is the user's supplied orange character, extracted with the built-in imagegen tool. It preserves the orange texture and white eyes, with transparent surroundings and no pupils. Firmware scales and decodes it once at startup; the black pupils are drawn separately and move gently only while microphone input contains sound.
 
-The source is 1254×1254 RGBA. The two measured white-eye centres are (373.1286, 386.8764) and (881.8142, 387.0029). `character_asset.hpp` scales these to the 320×320 cached sprite. Pupil radius and displacement leave the pupils inside the white eyes.
+The source is 1254×1254 RGBA. The two measured white-eye centres are (373.1286, 386.8764) and (881.8142, 387.0029). `character_asset.hpp` scales these to the 240×240 cached sprite. Pupil radius and displacement leave the pupils inside the white eyes. The 466×466 round-screen layout and collision envelope are shared in `pet_layout.h`; the alpha silhouette at this size fits a radius of 115.4 pixels before impact squashing, with a conservative 124-pixel collision radius including deformation and sampling margins.
 
 Final image-edit prompt:
 

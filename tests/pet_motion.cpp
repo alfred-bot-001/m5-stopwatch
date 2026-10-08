@@ -6,12 +6,15 @@
 
 static void bounded(const PetMotionView &v) {
  assert(std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.angle));
- assert(v.x>=PetMotion::left&&v.x<=PetMotion::right);
- assert(v.y>=PetMotion::top&&v.y<=PetMotion::bottom);
+ const float dx=v.x-PetMotion::center_x,dy=v.y-PetMotion::center_y;
+ assert(dx*dx+dy*dy<=(PetMotion::radius+0.001f)*(PetMotion::radius+0.001f));
  assert(std::fabs(v.angle)<=12.001f);
  assert(v.dizzy>=0.f&&v.dizzy<=1.f&&v.squash>=0.f&&v.squash<=1.f);
 }
 int main() {
+ assert(PetMotion::center_x==233.f&&PetMotion::center_y==233.f&&PetMotion::radius==107.f);
+ const PetMotion initial;
+ assert(initial.view().x==PetMotion::center_x&&initial.view().y==PetMotion::center_y);
  // Stationary noise cannot wake or extend the 30-minute display timer.
  PetMotion quiet;DisplayIdle idle(0);
  for(uint32_t t=0;t<=1800200;t+=25){
@@ -35,6 +38,43 @@ int main() {
  const auto hits=tilt.hits();assert(hits>0);
  for(uint32_t t=10000;t<25000;t+=25){assert(!tilt.sample(t,0.7f,0.5f,0.4f,0.f));bounded(tilt.advance(t));}
  assert(tilt.hits()==hits&&tilt.view().dizzy==0.f&&!tilt.view().active);
+ // A head-on hit rebounds along the normal instead of stopping or reflecting
+ // an unrelated axis. A single contact produces one impact, not two axes.
+ PetMotion normal_hit;bool bounced=false;
+ for(uint32_t t=0;t<5000;t+=8){
+  normal_hit.sample(t,0.7f,0.f,0.7f,0.f);bounded(normal_hit.advance(t));
+  if(normal_hit.hits()){
+   assert(normal_hit.hits()==1);
+   const float edge_x=normal_hit.view().x;
+   assert(std::fabs(edge_x-PetMotion::center_x-PetMotion::radius)<0.001f);
+   normal_hit.sample(t+8,0.7f,0.f,0.7f,0.f);bounded(normal_hit.advance(t+8));
+   assert(normal_hit.view().x<edge_x&&std::fabs(normal_hit.view().y-PetMotion::center_y)<0.001f);
+   bounced=true;break;
+  }
+ }
+ assert(bounced);
+ // Sliding along the rim retains tangential motion. Slowly changing the
+ // downhill direction must not manufacture impacts from radial corrections.
+ PetMotion rim;
+ for(uint32_t t=0;t<15000;t+=25){rim.sample(t,0.7f,0.f,0.7f,0.f);bounded(rim.advance(t));}
+ assert(!rim.view().active);
+ const auto rim_hits=rim.hits();const float rim_x=rim.view().x,rim_y=rim.view().y;
+ for(uint32_t t=15000;t<35000;t+=25){
+  const float ay=0.7f*std::fmin(1.f,(t-15000)/8000.f);
+  rim.sample(t,0.7f,ay,0.4f,0.f);bounded(rim.advance(t));
+  assert(rim.hits()==rim_hits);
+ }
+ assert(rim.view().y>rim_y+40.f&&rim.view().x<rim_x-15.f);
+ assert(!rim.view().active&&rim.view().dizzy==0.f);
+ // Every diagonal stays inside the circle, including between the extrema of
+ // its bounding box; a rectangular clamp would fail this containment check.
+ PetMotion diagonal;
+ const float diagonals[4][2]={{4.f,4.f},{-4.f,4.f},{-4.f,-4.f},{4.f,-4.f}};
+ for(uint32_t t=0;t<20000;t+=25){
+  const auto &a=diagonals[(t/2000)%4];
+  diagonal.sample(t,a[0],a[1],0.f,100.f);bounded(diagonal.advance(t));
+ }
+ assert(diagonal.hits()>2);
  // Strong alternating shake stays in the enclosure and produces dizzy impacts.
  PetMotion shake;unsigned activities=0;float max_dizzy=0.f;
  for(uint32_t t=0;t<6000;t+=25){
@@ -63,5 +103,5 @@ int main() {
   assert(std::fabs(wrap.view().x-normal.view().x)<0.001f);
   assert(std::fabs(wrap.view().dizzy-normal.view().dizzy)<0.001f);
  }
- std::puts("pet motion: bounds, settling, dizziness recovery, idle, faults and clock wrap passed");
+ std::puts("pet motion: circular containment, normal bounce, rim sliding, settling, dizziness, idle, faults and wrap passed");
 }
