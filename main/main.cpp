@@ -7,6 +7,7 @@
 #include "diagnostics.hpp"
 #include "display_idle.hpp"
 #include "character.hpp"
+#include "pet_motion.hpp"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -43,6 +44,10 @@ static uint32_t boot_reset_raw=0,boot_strap_raw=0;
 static bool led_config_ok=false;
 static bool mic_ok=false;
 static bool character_ready=false;
+static std::atomic<bool> imu_ready{false};
+static std::atomic<unsigned> imu_samples{0},imu_failures{0},pet_hits{0};
+static std::atomic<unsigned> imu_read_us{0},pet_render_us{0};
+static std::atomic<int> imu_ax{0},imu_ay{0},imu_az{0},pet_x{180},pet_y{155},pet_dizzy{0};
 static bool wireless_safe_boot=false;
 static TaskHandle_t main_task=nullptr;
 static std::atomic<bool> listen_requested{false},capture_enabled{false},mic_running{false};
@@ -149,7 +154,7 @@ extern "C" void vibe_status(char *out,size_t size) {
   pmic_events.load(),pmic_event_ms.load(),pmic_hold_ms.load(),pmic_hold_max_ms.load(),maintenance_intent.load(),unsigned(boot_reset_raw),unsigned(boot_strap_raw),unsigned(vibe_usb_lifecycle()),int(bool(REG_READ(SYSTEM_PERIP_CLK_EN1_REG)&SYSTEM_USB_DEVICE_CLK_EN)),
   unsigned(previous_diagnostic_valid),unsigned(previous_diagnostic.uptime_ms),unsigned(previous_diagnostic.intent),unsigned(previous_diagnostic.pmic_state),unsigned(previous_diagnostic.flags),unsigned(previous_diagnostic.events),unsigned(previous_diagnostic.last_event_ms),unsigned(previous_diagnostic.held_ms),unsigned(previous_diagnostic.max_held_ms),unsigned(previous_diagnostic.reset_raw),unsigned(previous_diagnostic.strap_raw),unsigned(previous_diagnostic.usb_events));
  size_t used=strlen(out);if(used && out[used-1]=='\n')out[--used]=0;
- char radio[768];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),radio);
+ char radio[768];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d imu=%d imu_samples=%u imu_fail=%u accel=%d,%d,%d pet=%d,%d hits=%u dizzy=%d imu_us=%u render_us=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),int(imu_ready.load()),imu_samples.load(),imu_failures.load(),imu_ax.load(),imu_ay.load(),imu_az.load(),pet_x.load(),pet_y.load(),pet_hits.load(),pet_dizzy.load(),imu_read_us.load(),pet_render_us.load(),radio);
 }
 extern "C" void app_main() {
  main_task=xTaskGetCurrentTaskHandle();
@@ -190,15 +195,19 @@ extern "C" void app_main() {
  assert(canvas.createSprite(360,360));
  screen_lock=xSemaphoreCreateMutex();assert(screen_lock);screen=&canvas;
  CharacterRenderer character;character_ready=character.begin();
+ PetMotion pet;
  if(!character_ready)++errors;
  // Establish a visible recovery path before starting optional radio work.
- character.draw(canvas,false,false,mic_ok);
+ character.draw(canvas,false,false,mic_ok,pet.view());
  canvas.setTextDatum(middle_center);canvas.setTextColor(TFT_DARKGREY,TFT_BLACK);
  canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(wireless_safe_boot?"USB SAFE / WIFI OFF":"USB / STARTING WIFI",180,318);
  canvas.pushSprite((M5.Display.width()-360)/2,(M5.Display.height()-360)/2);
  vibe_usb_init();if(!wireless_safe_boot)wireless_init();
+ // BMI270 uploads its configuration at begin(). Keep it after the recovery
+ // frame and USB startup, and never retry initialization in the input loop.
+ imu_ready=M5.Imu.begin(&M5.In_I2C,M5.getBoard());
  DisplayIdle display_idle(uint32_t(esp_timer_get_time()/1000));
- uint32_t last_power_read=0,last_draw=0;unsigned attempted_session=0;Swipe swipe;PowerButtonHistory power_buttons;
+ uint32_t last_power_read=0,last_draw=0,last_imu_read=0;unsigned attempted_session=0;Swipe swipe;PowerButtonHistory power_buttons;
  for(;;){
   uint32_t now=esp_timer_get_time()/1000;
   if(mic_running.load() && (!capture_enabled.load() || !listen_requested.load())){
@@ -248,8 +257,30 @@ extern "C" void app_main() {
    save_diagnostic(esp_timer_get_time()/1000);
   }
   bool was_awake=display_idle.awake();
+  bool motion_activity=false;
+  if(imu_ready.load() && uint32_t(now-last_imu_read)>=(was_awake?25u:200u)){
+   last_imu_read=now;
+   const int64_t imu_start=esp_timer_get_time();
+   const auto updated=M5.Imu.update();
+   if(updated & m5::IMU_Class::sensor_mask_accel){
+    m5::IMU_Class::imu_data_t data{};M5.Imu.getImuData(&data);
+    // The official StopWatch HAL exchanges X/Y. Accelerometer specific force
+    // opposes the gravity projection; use negative Y/X for screen right/down.
+    const float ax=-data.accel.y,ay=-data.accel.x,az=data.accel.z;
+    const float gyro=(updated & m5::IMU_Class::sensor_mask_gyro)
+     ?std::sqrt(data.gyro.x*data.gyro.x+data.gyro.y*data.gyro.y+data.gyro.z*data.gyro.z):0.f;
+    if(std::isfinite(ax)&&std::isfinite(ay)&&std::isfinite(az)&&std::isfinite(gyro)){
+     motion_activity=pet.sample(now,ax,ay,az,gyro);++imu_samples;
+     imu_ax=int(std::lround(ax*1000.f));imu_ay=int(std::lround(ay*1000.f));imu_az=int(std::lround(az*1000.f));
+    }else ++imu_failures;
+   }else ++imu_failures;
+   imu_read_us=unsigned(esp_timer_get_time()-imu_start);
+  }
+  const auto &pet_view=pet.advance(now);
+  pet_x=int(std::lround(pet_view.x));pet_y=int(std::lround(pet_view.y));
+  pet_hits=pet.hits();pet_dizzy=int(std::lround(pet_view.dizzy*100.f));
   character.update(now,listen_requested.load() && mic_running.load(),level.load());
-  bool awake=display_idle.update(now,display_activity.exchange(false) || listen_requested.load());
+  bool awake=display_idle.update(now,display_activity.exchange(false) || listen_requested.load() || motion_activity);
   display_idle_ms=display_idle.idle_ms(now);
   if(!awake){
    if(was_awake)M5.Display.setBrightness(0);
@@ -259,10 +290,11 @@ extern "C" void app_main() {
   }
   bool waking=!was_awake;
   bool held=yellow.load();
-  if(!waking && uint32_t(now-last_draw)<(held?33u:100u)){vTaskDelay(pdMS_TO_TICKS(8));continue;}
+  if(!waking && uint32_t(now-last_draw)<((held||pet_view.active)?33u:100u)){vTaskDelay(pdMS_TO_TICKS(8));continue;}
   last_draw=now;
   xSemaphoreTake(screen_lock,portMAX_DELAY);
-  character.draw(canvas,held,listen_requested.load() && mic_running.load(),mic_ok);
+  const int64_t render_start=esp_timer_get_time();
+  character.draw(canvas,held,listen_requested.load() && mic_running.load(),mic_ok,pet_view);
   wireless_view_t radio;wireless_view(&radio);char footer[48];
   if(wireless_safe_boot)snprintf(footer,sizeof(footer),"USB SAFE / WIFI OFF");
   else if(radio.error!=ESP_OK)snprintf(footer,sizeof(footer),"USB / WIFI ERR %X",unsigned(radio.error));
@@ -270,6 +302,7 @@ extern "C" void app_main() {
   canvas.setTextDatum(middle_center);canvas.setTextColor(radio.error!=ESP_OK?TFT_ORANGE:(wireless_ready()?TFT_CYAN:TFT_DARKGREY),TFT_BLACK);
   canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(footer,180,318);
   canvas.pushSprite((M5.Display.width()-360)/2,(M5.Display.height()-360)/2);
+  pet_render_us=unsigned(esp_timer_get_time()-render_start);
   // Restore the saved level explicitly: setBrightness(0) also changes the
   // library's remembered brightness, so wakeup() alone would stay dark.
   if(waking)M5.Display.setBrightness(screen_brightness);

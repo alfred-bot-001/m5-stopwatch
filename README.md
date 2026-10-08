@@ -7,7 +7,7 @@ M5Stack StopWatch C152 的 USB 麦克风、双键键盘和触摸滚轮固件，�
 - 麦克风：内置 ES8311，48 kHz / 16 bit / 单声道 USB Audio。未按黄色键时停止 I2S 采集，关闭 ADC 模拟电路、清空缓存，USB 音频接口保持连接并输出静音。v11 启用 Wi-Fi 连接配套接收器，不启用蓝牙。芯片重新启动需要时间，特别是首次冷启动可能约一秒，按住后稍等再说话。
 - 屏幕左右滑：发送左/右方向键，移动文字光标；每滑动约 24 屏幕像素一步。若同时按黄色键，电脑会收到 Option+方向键。
 - 屏幕上下滑：发送鼠标滚轮，上滑为正向滚轮、下滑为反向；实际页面方向受 macOS 的「自然滚动」设置影响。手势锁定首次明确的横/纵方向，抬手后重新判定；轻点和小幅抖动不触发。
-- 屏幕：亮屏时显示橙色小角色。按住黄色键并检测到声音时，黑色眼珠随音量轻轻转动；安静或松开后缓缓回正。角色下方的小点在按住黄色键时呈琥珀色，红色表示麦克风初始化失败。连续30分钟无交互后自动息屏，按黄/蓝键或触摸本机屏幕唤醒，原有按键和滑动功能继续生效。亮屏待机绘制频率约10fps，息屏时停止绘制；未测量整机电流或续航增益。
+- 屏幕：橙色小宠物在圆角框内随倾斜、晃动滑动和反弹，撞击时短暂压扁；连续碰撞后出现旋涡眼和绕头星星，静放后逐渐恢复。按住黄色键并检测到声音时，普通瞳孔随音量轻轻转动；安静或松开后缓缓回正。角色下方的小点在按住黄色键时呈琥珀色，红色表示麦克风初始化失败。连续30分钟无交互后自动息屏，按黄/蓝键、触摸屏幕或明显晃动本机可唤醒。移动或讲话时缩短刷新间隔，静止约10fps，息屏停止绘制；未测量整机电流或续航增益。
 - 断线重插时，必须先松开两键，避免重放旧按键。
 - 启动时关闭 M5PM1 状态灯输出，保留充电和供电位。v7 另提供受保护的整机电源重启命令；本机执行后，用户确认此前持续闪烁的绿灯已停止，详情见验证记录。
 
@@ -20,7 +20,7 @@ macOS 将有线 StopWatch 识别为 `StopWatch Vibe`，将接收器识别为 `St
 - 两条通路自动选择。StopWatch 显示 `WIRELESS` 时优先走接收器；显示 `USB / SEARCHING` 时仍在寻找接收器，此时自身 USB 有线功能可用。切换后先松开两键，再开始操作。
 - C480 的「USB连接」与「StopWatch连接」是两个独立状态。亮屏只说明有供电；「等待 USB」说明尚未完成主机 USB 连接，「等待 StopWatch」说明尚无有效无线控制连接。
 
-两端独立计算30分钟息屏时间。StopWatch 的黄/蓝键、触摸及按住讲话会延长亮屏；C480 的本机触摸、运行时短按 BOOT，或收到有效按键、滚轮、按住讲话（PTT）控制输入，会保持亮屏或唤醒。普通连接心跳、电量/电平更新、USB轮询和空闲静音音频不会延长亮屏；按住讲话本身仍属于交互，即使此时没有说话。息屏仅将 StopWatch AMOLED 亮度设为0或关闭 C480 背光，并停止画面刷新，USB、Wi-Fi 和输入处理保持运行，不关闭 MCU 或 PMIC 电源。
+两端独立计算30分钟息屏时间。StopWatch 的黄/蓝键、触摸、按住讲话及明显物理移动会延长亮屏；C480 的本机触摸、运行时短按 BOOT，或收到有效按键、滚轮、按住讲话（PTT）控制输入，会保持亮屏或唤醒。普通连接心跳、电量/电平更新、USB轮询、空闲静音、固定倾斜、传感器小幅噪声和宠物自身的动画余波不会延长亮屏；按住讲话本身仍属于交互，即使此时没有说话。息屏仅将 StopWatch AMOLED 亮度设为0或关闭 C480 背光，并停止画面刷新，USB、Wi-Fi 和输入处理保持运行，不关闭 MCU 或 PMIC 电源。
 
 诊断中的 `display_awake` 表示显示是否点亮，`display_idle_ms` 是距最近交互的毫秒数，`display_timeout_ms` 的生产默认值为 `1800000`。这项主动息屏功能不代表此前非预期黑屏、绿灯频闪故障已解决，历史排查限制仍见下文及验证记录。
 
@@ -57,6 +57,8 @@ clang++ -std=c++17 -Wall -Wextra -Werror tests/station_reconnect.cpp -o /tmp/sto
 /tmp/stopwatch-reconnect-test
 clang++ -std=c++17 -Wall -Wextra -Werror tests/display_idle.cpp -o /tmp/stopwatch-display-idle-test
 /tmp/stopwatch-display-idle-test
+clang++ -std=c++17 -Wall -Wextra -Werror tests/pet_motion.cpp -o /tmp/stopwatch-pet-test
+/tmp/stopwatch-pet-test
 python3 -B tests/diagnose.py
 # 在 ESP-IDF Python 环境中（需要 pyelftools）：
 python tests/usb_descriptors.py build/stopwatch_vibe.elf
@@ -65,6 +67,8 @@ python tests/usb_descriptors.py build/stopwatch_vibe.elf
 `tools/flash.py` 是这台已验证设备的保护性刷写入口，依赖本地 `backups/` 文件，GitHub 不包含这些备份。它校验完整原固件备份及设备身份，只刷写指定 StopWatch；使用 watchdog reset 退出下载模式。不要在启动过程中用通用串口程序操作 `303A:1001` 的 DTR/RTS，否则可能重新进入下载模式。固件诊断接口为 `CAFE:4020`，串口名称可随 USB 插口变化。
 
 v11 先显示首帧、启动 USB，再在后台启动无线。开机同时按住蓝、黄两键可跳过无线，显示 `USB SAFE / WIFI OFF`；完全松开两键后才响应键盘输入。无线初始化失败会保留有线功能，并在屏幕及诊断字段 `radio_err` / `radio_stage` / `radio_errno` 中显示原因。该入口无法防止所有驱动内部崩溃，不能替代硬件下载恢复。
+
+宠物使用内置 BMI270，初始化放在首帧及 USB 启动之后；亮屏读取间隔至少25ms，息屏至少200ms，实际频率受主线程绘图耗时影响。只处理驱动报告的新加速度，超过300ms无有效样本即停止施加旧姿态的力。低频读取没有关闭 IMU 的硬件供电。诊断 `imu` 是初始化结果，`imu_samples`/`imu_fail` 是有效样本/未取得有效新样本的次数，`accel` 是映射到屏幕的三轴毫 g，`pet` 是角色中心坐标，`hits` 是有效碰撞累计次数，`dizzy` 为0–100；`imu_us`/`render_us` 是最近一次采样/完整绘图耗时（微秒）。传感器不可用时保留讲话眼珠动画及原有输入功能。轴交换参考[官方出厂 IMU HAL](https://github.com/m5stack/M5StopWatch-UserDemo/blob/main/main/hal/hal_imu.cpp)。
 
 两份刷写脚本都会先将本次 ELF、固件、分区表和 bootloader 按 ELF SHA-256 归档到本地 `reports/firmware-archive/`。分析崩溃记录必须匹配当次 ELF；重编译后的符号即使来自相近源码，也不能当作原固件的精确定位。这些文件可能包含配对密码，不公开上传。
 
