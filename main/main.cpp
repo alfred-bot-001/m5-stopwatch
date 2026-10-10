@@ -10,6 +10,8 @@
 #include "pet_motion.hpp"
 #include "power_key.hpp"
 #include "pet_layout.h"
+#include "battery_level.hpp"
+#include "battery_ring.hpp"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -47,6 +49,9 @@ static bool led_config_ok=false;
 static bool power_key_guard_ok=false;
 static bool mic_ok=false;
 static bool character_ready=false;
+static bool battery_ring_ready=false;
+static std::atomic<int> battery_percent{-1};
+static std::atomic<unsigned> battery_filtered_mv{0};
 static std::atomic<bool> imu_ready{false};
 static std::atomic<unsigned> imu_samples{0},imu_failures{0},pet_hits{0};
 static std::atomic<unsigned> imu_read_us{0},pet_render_us{0};
@@ -180,7 +185,7 @@ extern "C" void vibe_status(char *out,size_t size) {
   pmic_events.load(),pmic_event_ms.load(),pmic_hold_ms.load(),pmic_hold_max_ms.load(),maintenance_intent.load(),unsigned(boot_reset_raw),unsigned(boot_strap_raw),unsigned(vibe_usb_lifecycle()),int(bool(REG_READ(SYSTEM_PERIP_CLK_EN1_REG)&SYSTEM_USB_DEVICE_CLK_EN)),
   unsigned(previous_diagnostic_valid),unsigned(previous_diagnostic.uptime_ms),unsigned(previous_diagnostic.intent),unsigned(previous_diagnostic.pmic_state),unsigned(previous_diagnostic.flags),unsigned(previous_diagnostic.events),unsigned(previous_diagnostic.last_event_ms),unsigned(previous_diagnostic.held_ms),unsigned(previous_diagnostic.max_held_ms),unsigned(previous_diagnostic.reset_raw),unsigned(previous_diagnostic.strap_raw),unsigned(previous_diagnostic.usb_events));
  size_t used=strlen(out);if(used && out[used-1]=='\n')out[--used]=0;
- snprintf(out+used,size-used," key_guard=%d",int(power_key_guard_ok));used=strlen(out);
+ snprintf(out+used,size-used," key_guard=%d bat_pct=%d bat_mv=%u bat_ring=%d",int(power_key_guard_ok),battery_percent.load(),battery_filtered_mv.load(),int(battery_ring_ready));used=strlen(out);
  char radio[768];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d imu=%d imu_samples=%u imu_fail=%u accel=%d,%d,%d pet=%d,%d hits=%u dizzy=%d imu_us=%u render_us=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),int(imu_ready.load()),imu_samples.load(),imu_failures.load(),imu_ax.load(),imu_ay.load(),imu_az.load(),pet_x.load(),pet_y.load(),pet_hits.load(),pet_dizzy.load(),imu_read_us.load(),pet_render_us.load(),radio);
 }
 extern "C" void app_main() {
@@ -234,12 +239,17 @@ extern "C" void app_main() {
  assert(canvas.createSprite(PET_SCREEN_SIZE,PET_SCREEN_SIZE));
  screen_lock=xSemaphoreCreateMutex();assert(screen_lock);screen=&canvas;
  CharacterRenderer character;character_ready=character.begin();
+ BatteryRing battery_ring;battery_ring_ready=battery_ring.begin();
+ BatteryLevel battery_level;
+ int last_drawn_battery=-1;
  PetMotion pet;
  if(!character_ready)++errors;
+ if(!battery_ring_ready)++errors;
  // Establish a visible recovery path before starting optional radio work.
  character.draw(canvas,false,false,mic_ok,pet.view());
  canvas.setTextDatum(middle_center);canvas.setTextColor(TFT_DARKGREY,TFT_BLACK);
  canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(wireless_safe_boot?"USB SAFE / WIFI OFF":"USB / STARTING WIFI",PET_SCREEN_SIZE/2,432);
+ battery_ring.draw(canvas,-1); // Unknown until the first valid PMIC reading.
  canvas.pushSprite(0,0);
  vibe_usb_init();if(!wireless_safe_boot)wireless_init();
  // BMI270 uploads its configuration at begin(). Keep it after the recovery
@@ -293,6 +303,8 @@ extern "C" void app_main() {
     pmic_seconds=unsigned(timer[0])|(unsigned(timer[1])<<8)|(unsigned(timer[2])<<16)|(unsigned(timer[3])<<24);
     battery_mv=voltage[0]|(unsigned(voltage[1])<<8);usb_mv=voltage[2]|(unsigned(voltage[3])<<8);}
    pmic_valid=ok;
+   battery_level.sample(now,ok,battery_mv.load());
+   battery_percent=battery_level.percent();battery_filtered_mv=battery_level.filtered_mv();
    save_diagnostic(esp_timer_get_time()/1000);
   }
   bool was_awake=display_idle.awake();
@@ -347,7 +359,12 @@ extern "C" void app_main() {
   const uint16_t dot=!mic_ok?TFT_RED:(held?canvas.color565(255,181,54)
    :(listen_requested.load()&&mic_running.load()?TFT_CYAN:canvas.color565(32,79,76)));
   canvas.drawSpot(PET_SCREEN_CENTER,dot_y,3.f,dot);
-  push_pet_frame(canvas,pet_view,footer_at_top,waking);
+  const int ring_percent=battery_percent.load();
+  battery_ring.draw(canvas,ring_percent);
+  // An updated arc must reach the whole perimeter, including pixels outside
+  // the pet/footer dirty rectangles. Ordinary animation keeps partial pushes.
+  push_pet_frame(canvas,pet_view,footer_at_top,waking || ring_percent!=last_drawn_battery);
+  last_drawn_battery=ring_percent;
   pet_render_us=unsigned(esp_timer_get_time()-render_start);
   // Restore the saved level explicitly: setBrightness(0) also changes the
   // library's remembered brightness, so wakeup() alone would stay dark.
