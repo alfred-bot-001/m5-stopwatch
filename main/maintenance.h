@@ -4,7 +4,8 @@
 #include <stddef.h>
 #include <string.h>
 #ifdef VIBE_RECEIVER
-#define VIBE_DEVICE_ID "9C139E8AC480"
+#include "receiver_board.h"
+#define VIBE_DEVICE_ID VIBE_RX_DEVICE_ID
 #else
 #define VIBE_DEVICE_ID "288485439560"
 #endif

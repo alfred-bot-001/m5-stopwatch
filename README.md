@@ -1,6 +1,6 @@
 # StopWatch Vibe
 
-M5Stack StopWatch C152 的 USB 麦克风、双键键盘和触摸滚轮固件，面向 Mac 上的语音编程。v11 增加[立创实战派 ESP32-S3 无线接收器](receiver/README.md)，已完成无线讲话试测及接收器状态页、断电重插验证，最终无线键鼠验收仍待完成；此前已验证的有线版本为 v10。此前 StopWatch 非预期闲置黑屏的根因仍在调查。实测范围见 [验证记录](VALIDATION.md)。
+M5Stack StopWatch C152 的 USB 麦克风、双键键盘和触摸滚轮固件，面向 Mac 上的语音编程。v11 增加[立创 C480 / Waveshare GEEK 无线接收器](receiver/README.md)，已完成无线讲话试测及接收器状态页、断电重插验证，最终无线键鼠验收仍待完成；此前已验证的有线版本为 v10。此前 StopWatch 非预期闲置黑屏的根因仍在调查。实测范围见 [验证记录](VALIDATION.md)。
 
 - 黄色左键：按住开启麦克风，同时保持右 Option（USB Right Alt）；松开关闭采集并释放按键。
 - 蓝色键：Enter。两键同时按是 Option+Enter；长按 Enter 的重复行为由电脑决定。
@@ -15,6 +15,8 @@ M5Stack StopWatch C152 的 USB 麦克风、双键键盘和触摸滚轮固件，�
 macOS 将有线 StopWatch 识别为 `StopWatch Vibe`，将接收器识别为 `StopWatch Receiver C480`，使用系统自带的 USB 音频、键盘和鼠标驱动。音频输入列表中的名称分别是 `StopWatch Vibe Microphone` 和 `StopWatch Wireless Microphone`。键盘与鼠标共用 HID 接口，以 Report ID 1/2 区分，适配 ESP32-S3 的输入端点数量限制。首次使用请在系统或目标应用中选择对应输入设备；USB 固件无法强制另一台电脑切换默认麦克风。语音转文字和快捷键触发行为由电脑上的应用负责，固件不做识别、不保存录音。v11 只在两端的专用无线网络传送音频和控制信息，不连接互联网。
 
 ## 有线与无线使用
+
+GEEK-988C 接收器的 USB 名称是 `StopWatch Receiver GEEK`，麦克风选择 `StopWatch GEEK Microphone`。它沿用手表原配对信息；GEEK 与旧 C480 只开启其中一台，避免手表连接到另一个接收器。GEEK 的小屏是240×135，无触摸，运行时短按BOOT或操作手表可唤醒，保留30分钟息屏。构建与防混刷步骤见[接收器说明](receiver/README.md)。
 
 - 有线：StopWatch 用数据线连接电脑，直接作为 USB 键鼠和麦克风使用。
 - 无线：C480 用数据线连接电脑，StopWatch 自动连接 C480 建立的 `StopWatch-C480` 专用 Wi-Fi，再由 C480 输出 USB 键鼠和麦克风。StopWatch 可以用电池供电；电脑无需加入该 Wi-Fi，也无需家用路由器。
@@ -73,9 +75,9 @@ v11 先显示首帧、启动 USB，再在后台启动无线。开机同时按住
 
 宠物使用内置 BMI270，初始化放在首帧及 USB 启动之后；亮屏读取间隔至少25ms，息屏至少200ms，实际频率受主线程绘图耗时影响。只处理驱动报告的新加速度，超过300ms无有效样本即停止施加旧姿态的力。低频读取没有关闭 IMU 的硬件供电。诊断 `imu` 是初始化结果，`imu_samples`/`imu_fail` 是有效样本/未取得有效新样本的次数，`accel` 是映射到屏幕的三轴毫 g，`pet` 是角色中心坐标，`hits` 是有效碰撞累计次数，`dizzy` 为0–100；`imu_us`/`render_us` 是最近一次采样/完整绘图耗时（微秒）。传感器不可用时保留讲话眼珠动画及原有输入功能。轴交换参考[官方出厂 IMU HAL](https://github.com/m5stack/M5StopWatch-UserDemo/blob/main/main/hal/hal_imu.cpp)。
 
-两份刷写脚本都会先将本次 ELF、固件、分区表和 bootloader 按 ELF SHA-256 归档到本地 `reports/firmware-archive/`。分析崩溃记录必须匹配当次 ELF；重编译后的符号即使来自相近源码，也不能当作原固件的精确定位。这些文件可能包含配对密码，不公开上传。
+三份刷写脚本都会先将本次 ELF、固件、分区表和 bootloader 按 ELF SHA-256 归档到本地 `reports/firmware-archive/`。分析崩溃记录必须匹配当次 ELF；重编译后的符号即使来自相近源码，也不能当作原固件的精确定位。这些文件可能包含配对密码，不公开上传。
 
-诊断串口每秒输出 `VIBE` 状态：采样计数、电平、按键、运行时间、重启原因及错误计数。v5 还包含 BOOT 引脚 `g0`、黄/蓝按键累计次数 `presses`、电源按键状态 `pm_btn` 和配置 `pm_cfg`，用于调查按黄色键后黑屏。v6 增加电源寄存器 `pm_pwr` 和 LED 配置读回校验 `led_cfg_ok`；v7 增加 PMIC 标识 `pm_id`、第二按键配置 `pm_cfg2`、GPIO 复用/驱动/输入 `pm_func`/`pm_drv`/`pm_io`，以及本轮读取是否成功的 `pm_valid`。`P` 返回 `FRAME 466 466 434312` 后接 RGB565 大端屏幕帧；接收器保持320×240。`tools/capture_frame.py` 按响应尺寸解码并输出PNG。
+诊断串口每秒输出 `VIBE` 状态：采样计数、电平、按键、运行时间、重启原因及错误计数。v5 还包含 BOOT 引脚 `g0`、黄/蓝按键累计次数 `presses`、电源按键状态 `pm_btn` 和配置 `pm_cfg`，用于调查按黄色键后黑屏。v6 增加电源寄存器 `pm_pwr` 和 LED 配置读回校验 `led_cfg_ok`；v7 增加 PMIC 标识 `pm_id`、第二按键配置 `pm_cfg2`、GPIO 复用/驱动/输入 `pm_func`/`pm_drv`/`pm_io`，以及本轮读取是否成功的 `pm_valid`。`P` 返回 `FRAME 466 466 434312` 后接 RGB565 大端屏幕帧；C480接收器为320×240，GEEK为240×135。`tools/capture_frame.py` 按响应尺寸解码并输出PNG。
 
 维护命令必须成对发送完整行，两步间隔不超过 2 秒。进入 ROM 下载模式使用 `VIBE/1 ARM-BOOT 288485439560\n` 与 `VIBE/1 CONFIRM-BOOT 288485439560\n`。通过 M5PM1 重启整机使用 `VIBE/1 ARM-RESET 288485439560\n` 与 `VIBE/1 CONFIRM-RESET 288485439560\n`；仅在显式收到这组命令时执行一次，不会每次启动自动重启。两种确认不能混用，单字节 `B` 不再触发复位。后者会短暂断开 USB，适用于排查仅重启 ESP32 后仍保留的 PMIC 状态。
 

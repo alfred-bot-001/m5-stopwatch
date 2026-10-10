@@ -13,3 +13,4 @@ __pycache__/
 receiver/build*/
 receiver/sdkconfig*
 !receiver/sdkconfig.defaults
+!receiver/sdkconfig.geek.defaults

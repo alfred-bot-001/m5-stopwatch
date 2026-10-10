@@ -3,9 +3,9 @@ import argparse,struct,zlib
 from pathlib import Path
 import serial
 from serial.tools.list_ports import comports
-p=argparse.ArgumentParser();p.add_argument('--receiver',action='store_true');p.add_argument('--output',required=True);args=p.parse_args()
-identity='9C139E8AC480-VIBE1' if args.receiver else '288485439560-VIBE1'
-port=next(p for p in comports() if p.vid==0xcafe and p.serial_number==identity)
+p=argparse.ArgumentParser();device=p.add_mutually_exclusive_group();device.add_argument('--receiver',action='store_true');device.add_argument('--geek',action='store_true');p.add_argument('--output',required=True);args=p.parse_args()
+identity,pid=('D4059278988C-VIBE1',0x4022) if args.geek else ('9C139E8AC480-VIBE1',0x4021) if args.receiver else ('288485439560-VIBE1',0x4020)
+port=next(p for p in comports() if p.vid==0xcafe and p.pid==pid and p.serial_number==identity)
 with serial.Serial(port.device,115200,timeout=3) as s:
  s.write(b'P');s.flush()
  for _ in range(10):

@@ -36,7 +36,7 @@ static const tusb_desc_device_t device = {
  .bDeviceProtocol=MISC_PROTOCOL_IAD, .bMaxPacketSize0=64,
  .idVendor=0xcafe,
 #ifdef VIBE_RECEIVER
- .idProduct=0x4021,
+ .idProduct=VIBE_RX_USB_PID,
 #else
  .idProduct=0x4020,
 #endif
@@ -59,7 +59,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index,uint16_t langid) {
  (void)langid;
  static uint16_t result[64];
  #ifdef VIBE_RECEIVER
- static const char *strings[]={"", "Local prototype", "StopWatch Receiver C480", "9C139E8AC480-VIBE1", "StopWatch Wireless Microphone", "StopWatch Wireless Controls", "Diagnostics"};
+ static const char *strings[]={"", "Local prototype", VIBE_RX_USB_PRODUCT, VIBE_RX_DEVICE_ID "-VIBE1", VIBE_RX_USB_AUDIO, "StopWatch Wireless Controls", "Diagnostics"};
 #else
  static const char *strings[]={"", "Local prototype", "StopWatch Vibe", "288485439560-VIBE1", "StopWatch Vibe Microphone", "StopWatch Vibe Controls", "Diagnostics"};
 #endif
@@ -204,7 +204,7 @@ static void control_task(void *arg) {
    if(c=='P' && !snapshot){snapshot=vibe_snapshot(&snap_size);snap_pos=0;
     if(snapshot){char h[64];int n=snprintf(h,sizeof(h),
 #ifdef VIBE_RECEIVER
-     "FRAME 320 240 %u\n",(unsigned)snap_size
+     "FRAME %u %u %u\n",(unsigned)VIBE_RX_WIDTH,(unsigned)VIBE_RX_HEIGHT,(unsigned)snap_size
 #else
      "FRAME %u %u %u\n",(unsigned)PET_SCREEN_SIZE,(unsigned)PET_SCREEN_SIZE,(unsigned)snap_size
 #endif

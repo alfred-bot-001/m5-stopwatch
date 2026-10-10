@@ -1,9 +1,38 @@
-# StopWatch 无线接收器 C480
+# StopWatch 无线接收器
+
+支持 C480 和 Waveshare ESP32-S3-GEEK 两块板。两者复用无线协议和 USB 键鼠/音频实现，屏幕与内存配置独立构建，不能混刷。
+
+| 板子 | 芯片 MAC | USB 产品 / PID | 麦克风名称 |
+|---|---|---|---|
+| C480 | `9C:13:9E:8A:C4:80` | `StopWatch Receiver C480` / `CAFE:4021` | `StopWatch Wireless Microphone` |
+| GEEK-988C | `D4:05:92:78:98:8C` | `StopWatch Receiver GEEK` / `CAFE:4022` | `StopWatch GEEK Microphone` |
+
+## GEEK-988C
+
+16MB Flash、2MB **Quad PSRAM**（40MHz，启用启动内存测试）；独立的 `sdkconfig.geek` 和 `build-geek` 避免沿用 C480 的 Octal 配置。保留原厂 NVS 的 `0x9000/0x5000` 边界。刷机工具要求这台设备的完整16MiB备份及 SHA-256 校验，核对实际 MAC、编译配置、ELF中的USB身份和 ELF/bin 匹配后，仅写 bootloader、分区表和应用，不擦除整片。
+
+```sh
+bash tools/build_geek.sh build
+python tools/flash_geek.py
+python tools/capture_frame.py --geek --output reports/geek.png
+```
+
+上述命令从仓库根目录运行，需要已安装的 ESP-IDF 5.5/Python 环境和现有 `private/pairing.h`。本地原厂备份路径为仓库同级 `backups/receiver-d4059278988c/original-20261010.bin`，不上传。USB 序列号为 `D4059278988C-VIBE1`；恢复下载时必须使用该设备对应的两步维护命令。
+
+GEEK 是替换接收器，沿用已配对 StopWatch 的 `StopWatch-C480` 网络名称和私有密码，因此无需给手表重新刷机。**使用 GEEK 时关闭旧 C480，使用 C480 时拔下 GEEK**；两者同时开启会让手表选择其中一个，不提供双接收器广播。电脑不需要加入此 Wi-Fi。电脑输入设备选择 `StopWatch GEEK Microphone`。
+
+1.14英寸240×135 ST7789横屏显示连接/讲话状态、音量条、手表电池电压、USB状态和丢包数。SCLK/MOSI/CS/DC/RST为GPIO12/11/10/8/9；mode0、27MHz，横屏偏移40/53、MADCTL0x70和反色沿用官方示例。GPIO7背光高有效，1kHz PWM、75%亮度；GPIO19/20专用于USB。GPIO0 BOOT运行时仅用于唤醒屏幕，不触发下载；按住BOOT再接USB仍可进入ROM恢复。GEEK没有触摸屏，也没有板载麦克风；声音来自无线连接的StopWatch。
+
+30分钟没有有效交互后关闭背光，USB/Wi-Fi继续运行；收到手表按键、滚轮、PTT或短按本机BOOT唤醒。屏幕初始化与DMA传输失败不会阻止USB和无线启动。诊断含`board=geek`、`psram_size`、屏幕错误及尺寸，截图响应为`FRAME 240 135 64800`；软件帧缓存不能替代实屏验收。
+
+参考：[Waveshare GEEK](https://docs.waveshare.com/ESP32-S3-GEEK)、[官方示例](https://files.waveshare.com/wiki/ESP32-S3-GEEK/ESP32-S3-GEEK-Demo.zip)（`MPY/LCD/lcd_example.py`）、[原理图](https://files.waveshare.com/wiki/ESP32-S3-GEEK/ESP32-S3-GEEK-Schematic1.pdf)。
+
+## C480
 
 硬件：立创实战派 ESP32-S3，N16R8，出厂 MAC `9C:13:9E:8A:C4:80`。
 配套 StopWatch 的 MAC 是 `28:84:85:43:95:60`，两者不能混刷。
 
-## 屏幕
+### C480 屏幕
 
 320×240 状态页显示无线连接、按住讲话状态、实时音量条、StopWatch 电池电压、USB 连接和累计音频丢包。电池电压不是经过标定的电量百分比。显示的是远端 StopWatch 麦克风状态，接收器自身的双麦克风、扬声器和摄像头不启用。
 
@@ -35,7 +64,7 @@
 
 无线时开启 Wi-Fi，续航、最大距离和抗干扰能力需实测，不能沿用有线待机的功耗估计。原始音频不压缩，避免编解码损耗；无线延迟和丢包仍可能影响语音。
 
-## USB 连接与 Hub 层级
+## C480 USB 连接与 Hub 层级
 
 使用带数据传输功能的 Type-C 线和正常5V供电即可；当前 ESP32-S3 接口以 USB 2.0 全速12Mbps运行，不要求USB 3.0或专用线。固件声明最大500mA供电预算，这不是实测电流。
 
