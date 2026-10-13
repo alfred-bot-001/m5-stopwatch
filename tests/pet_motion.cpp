@@ -10,6 +10,7 @@ static void bounded(const PetMotionView &v) {
  assert(dx*dx+dy*dy<=(PetMotion::radius+0.001f)*(PetMotion::radius+0.001f));
  assert(std::fabs(v.angle)<=12.001f);
  assert(v.dizzy>=0.f&&v.dizzy<=1.f&&v.squash>=0.f&&v.squash<=1.f);
+ assert(std::isfinite(v.angry)&&v.angry>=0.f&&v.angry<=1.f);
 }
 int main() {
  assert(PetMotion::center_x==233.f&&PetMotion::center_y==233.f&&PetMotion::radius==107.f);
@@ -22,7 +23,7 @@ int main() {
   assert(!quiet.sample(t,noise,-noise,1.f+noise,0.2f));
   bounded(quiet.advance(t));idle.update(t,false);
  }
- assert(!idle.awake()&&quiet.hits()==0&&!quiet.view().active);
+ assert(!idle.awake()&&quiet.hits()==0&&!quiet.view().active&&quiet.view().angry==0.f);
  // Physical movement wakes an expired display, while its subsequent bounce
  // animation alone cannot keep the display awake.
  const bool movement=quiet.sample(1800225,0.8f,0.f,0.6f,60.f);
@@ -37,7 +38,7 @@ int main() {
  for(uint32_t t=0;t<10000;t+=25){assert(!tilt.sample(t,0.7f,0.5f,0.4f,0.f));bounded(tilt.advance(t));}
  const auto hits=tilt.hits();assert(hits>0);
  for(uint32_t t=10000;t<25000;t+=25){assert(!tilt.sample(t,0.7f,0.5f,0.4f,0.f));bounded(tilt.advance(t));}
- assert(tilt.hits()==hits&&tilt.view().dizzy==0.f&&!tilt.view().active);
+ assert(tilt.hits()==hits&&tilt.view().dizzy==0.f&&!tilt.view().active&&tilt.view().angry==0.f);
  // A head-on hit rebounds along the normal instead of stopping or reflecting
  // an unrelated axis. A single contact produces one impact, not two axes.
  PetMotion normal_hit;bool bounced=false;
@@ -76,16 +77,49 @@ int main() {
  }
  assert(diagonal.hits()>2);
  // Strong alternating shake stays in the enclosure and produces dizzy impacts.
- PetMotion shake;unsigned activities=0;float max_dizzy=0.f;
+ PetMotion shake;unsigned activities=0;float max_dizzy=0.f,max_angry=0.f;
  for(uint32_t t=0;t<6000;t+=25){
   const float a=(t/500)%2?4.f:-4.f;
   activities+=shake.sample(t,a,-a,0.f,160.f);bounded(shake.advance(t));
   max_dizzy=std::fmax(max_dizzy,shake.view().dizzy);
+  max_angry=std::fmax(max_angry,shake.view().angry);
  }
- assert(activities>10&&shake.hits()>2&&max_dizzy>0.5f);
+ assert(activities>10&&shake.hits()>2&&max_dizzy>0.5f&&max_angry>0.8f);
  // Stopping gradually restores the eyes, with no sticky velocity or old force.
  for(uint32_t t=6000;t<26000;t+=25){shake.sample(t,0.f,0.f,1.f,0.f);bounded(shake.advance(t));}
- assert(shake.view().dizzy==0.f&&!shake.view().active);
+ assert(shake.view().dizzy==0.f&&!shake.view().active&&shake.view().angry==0.f);
+ // A constant extreme tilt, the first sample, or one isolated corrupt sample
+ // and its return edge must never be interpreted as sustained strong shaking.
+ PetMotion extreme;
+ for(uint32_t t=0;t<10000;t+=25){
+  extreme.sample(t,4.f,-4.f,0.f,0.f);bounded(extreme.advance(t));assert(extreme.view().angry==0.f);
+ }
+ PetMotion spike;
+ for(uint32_t t=0;t<3000;t+=25){
+  const bool corrupt=t==500u;
+  spike.sample(t,corrupt?4.f:0.f,corrupt?-4.f:0.f,1.f,corrupt?1500.f:0.f);
+  bounded(spike.advance(t));assert(spike.view().angry==0.f);
+ }
+ // Large angular speed has to persist, while moderate rotation stays calm.
+ PetMotion rotation;
+ for(uint32_t t=0;t<3000;t+=25){
+  rotation.sample(t,0.f,0.f,1.f,100.f);rotation.advance(t);assert(rotation.view().angry==0.f);
+ }
+ for(uint32_t t=3000;t<3500;t+=25){rotation.sample(t,0.f,0.f,1.f,330.f);bounded(rotation.advance(t));}
+ assert(rotation.view().angry>0.8f);
+ for(uint32_t t=3500;t<=9000;t+=25){rotation.sample(t,0.f,0.f,1.f,0.f);bounded(rotation.advance(t));}
+ assert(rotation.view().angry==0.f);
+ for(uint32_t t=9025;t<9500;t+=25){rotation.sample(t,0.f,0.f,1.f,330.f);bounded(rotation.advance(t));}
+ assert(rotation.view().angry>0.8f);
+ // No samples arriving is not continuing physical interaction. Emotion still
+ // cools down after a long renderer pause, without integrating a giant step.
+ bounded(rotation.advance(16000));assert(rotation.view().angry==0.f);
+ // Sporadic, stale samples cannot accumulate anger across absent sensor time.
+ PetMotion sporadic;
+ for(uint32_t t=0;t<10000;t+=500){
+  sporadic.sample(t,(t/500)%2?4.f:-4.f,0.f,0.f,1000.f);bounded(sporadic.advance(t));
+  assert(sporadic.view().angry==0.f);
+ }
  // Missing/bad samples stop applying the old force; long gaps cannot teleport.
  PetMotion fault;fault.sample(0,1.f,0.f,0.f,0.f);fault.advance(0);fault.advance(25);
  const float x=fault.view().x;
@@ -102,6 +136,7 @@ int main() {
   bounded(wrap.advance(wrapped));normal.advance(t);
   assert(std::fabs(wrap.view().x-normal.view().x)<0.001f);
   assert(std::fabs(wrap.view().dizzy-normal.view().dizzy)<0.001f);
+  assert(std::fabs(wrap.view().angry-normal.view().angry)<0.001f);
  }
- std::puts("pet motion: circular containment, normal bounce, rim sliding, settling, dizziness, idle, faults and wrap passed");
+ std::puts("pet motion: circular containment, bounce, settling, dizziness, sustained-shake anger, calm recovery, idle, faults and wrap passed");
 }

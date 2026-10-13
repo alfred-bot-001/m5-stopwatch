@@ -1,4 +1,52 @@
-# Orange character sprite
+# Orange frog expression assets
+
+The current firmware uses the eight PNGs supplied by the user in
+`小橙蛙表情套装.zip` (2026-10-13). The files are copied byte for byte;
+no image generation, texture retouching or source-image resizing was performed.
+
+| Embedded file | Supplied file |
+| --- | --- |
+| `frog_happy.png` | `01_happy_开心.png` |
+| `frog_laugh.png` | `02_laugh_大笑.png` |
+| `frog_surprised.png` | `03_surprised_惊讶.png` |
+| `frog_shy.png` | `04_shy_害羞.png` |
+| `frog_sad.png` | `05_sad_难过.png` |
+| `frog_angry.png` | `06_angry_生气.png` |
+| `frog_sleepy.png` | `07_sleepy_犯困.png` |
+| `frog_wink.png` | `08_wink_眨眼.png` |
+
+Seven sources are 477×385 RGBA. Sleepy is 491×459, with the same body
+beginning at row 74 and additional Zs above it. Every body is displayed at the
+same scale, 218/477, and anchor (11,44) on a 240×240 RGB565 canvas. During display
+composition only, Sleepy's original Zs are clipped and smaller brown Zs are drawn
+near the head within the collision envelope. Its body is neither shifted nor
+shrunk relative to the other expressions. The original PNG remains unchanged.
+
+All eight PNGs are decoded once into PSRAM, plus one speaking-body cache and one
+working frame: 10 × 240 × 240 × 2 = 1,152,000 bytes. There is no PNG decode during
+animation. The former 1,272,050-byte source below is no longer embedded; the eight
+new PNGs total 1,093,263 bytes.
+
+The happy/talking/dizzy white eyes are replaced locally so the original static
+pupils do not remain beneath moving pupils or spirals. The white circles are
+about 1.7 displayed pixels larger than the supplied circles to cover the static
+pupils where they originally overlap the white edges. The pupils retain the
+supplied inward gaze, dark brown-black color and white glints. Other expressions
+use their supplied eyelids, brows, cheeks and tears directly. Speech uses the
+supplied low mouth position and laugh-mouth palette; its opening follows the
+smoothed sound level. Only the roughly 30×9 pixel happy-mouth stroke is removed
+in the separate startup speaking cache using adjacent same-column skin colors,
+so there is no solid-color facial patch. The happy source and its cache are kept
+intact, and silence restores its original closed-mouth design.
+
+Dizziness draws two spiral pupils and three orbiting, filled gold five-point
+stars. Angry faces retain their own brows and eyes even when dizzy stars remain.
+Star centers are limited to radius 219 around the physical screen center; their
+5.8-pixel tips remain inside the battery ring's inner radius 228. The body and
+small Z decorations fit the existing 124-pixel collision envelope and dirty
+rectangle, including the existing impact squash.
+
+## Previous mouthless sprite (historical, not embedded)
 
 `orange_character.png` is the user's supplied orange character, extracted with the built-in imagegen tool. It preserves the orange texture and white eyes, with transparent surroundings and no pupils. Firmware scales and decodes it once at startup; the black pupils are drawn separately and move gently only while microphone input contains sound.
 

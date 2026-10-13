@@ -4,7 +4,7 @@
 #include "pet_layout.h"
 
 struct PetMotionView {
- float x=PET_SCREEN_CENTER,y=PET_SCREEN_CENTER,angle=0.f,squash=0.f,dizzy=0.f,impact=0.f;
+ float x=PET_SCREEN_CENTER,y=PET_SCREEN_CENTER,angle=0.f,squash=0.f,dizzy=0.f,impact=0.f,angry=0.f;
  bool active=false;
 };
 
@@ -21,7 +21,8 @@ public:
   if(!std::isfinite(ax)||!std::isfinite(ay)||!std::isfinite(az)||!std::isfinite(gyro_speed))return false;
   ax=limit(ax,-4.f,4.f);ay=limit(ay,-4.f,4.f);az=limit(az,-4.f,4.f);
   const bool first=!sampled_;
-  const float dt=first?0.f:std::fmin(0.25f,uint32_t(now-last_sample_)*0.001f);
+  const uint32_t elapsed=first?0u:uint32_t(now-last_sample_);
+  const float dt=std::fmin(0.25f,elapsed*0.001f);
   bool activity=false;
   if(first){gx_=anchor_x_=ax;gy_=anchor_y_=ay;anchor_z_=az;last_activity_=now;}
   else {
@@ -34,6 +35,30 @@ public:
    const float blend=1.f-std::exp(-dt/0.28f);
    gx_+=(ax-gx_)*blend;gy_+=(ay-gy_)*blend;
   }
+  // Anger needs repeated strong physical samples. A one-off bad sample (even
+  // followed by a return to normal), fixed tilt, and old data after a long gap
+  // cannot build enough evidence. Derivative + minimum delta rejects noise;
+  // sustained rapid rotation also qualifies even if acceleration is steady.
+  if(!first && elapsed>0u && elapsed<=100u){
+   const float dx=ax-previous_x_,dy=ay-previous_y_,dz=az-previous_z_;
+   const float delta2=dx*dx+dy*dy+dz*dz;
+   const float threshold=std::fmax(0.25f,dt*14.f);
+   const bool strong=delta2>threshold*threshold || std::fabs(gyro_speed)>260.f;
+   agitation_=limit(agitation_+dt*(strong?1.f:-0.45f),0.f,0.60f);
+   bool repeated_jerks=false;
+   if(delta2>1.f){
+    if(heavy_jerks_==0 || uint32_t(now-jerk_window_)>1800u){
+     jerk_window_=last_jerk_=now;heavy_jerks_=1;
+    }else if(uint32_t(now-last_jerk_)>=120u){
+     last_jerk_=now;if(heavy_jerks_<3)++heavy_jerks_;
+    }
+    repeated_jerks=heavy_jerks_>=3;
+   }
+   if(strong && (agitation_>=0.20f || repeated_jerks)){
+    last_strong_=now;view_.angry=std::fmax(view_.angry,0.82f);
+   }
+  }else if(first || elapsed>100u){agitation_=0.f;heavy_jerks_=0;}
+  previous_x_=ax;previous_y_=ay;previous_z_=az;
   // Slow tilt makes the pet slide; a quick movement adds an opposing impulse.
   force_x_=limit(deadzone(gx_)*300.f-(ax-gx_)*530.f,-1600.f,1600.f);
   force_y_=limit(deadzone(gy_)*300.f-(ay-gy_)*530.f,-1600.f,1600.f);
@@ -42,7 +67,13 @@ public:
 
  const PetMotionView &advance(uint32_t now) {
   if(!started_){last_update_=now;started_=true;return view_;}
-  float remaining=std::fmin(0.064f,uint32_t(now-last_update_)*0.001f);last_update_=now;
+  const uint32_t elapsed=uint32_t(now-last_update_);
+  float remaining=std::fmin(0.064f,elapsed*0.001f);last_update_=now;
+  // Emotion recovery follows elapsed time even after a paused renderer. The
+  // physics integration below still caps long gaps to prevent teleportation.
+  const uint32_t since_strong=uint32_t(now-last_strong_);
+  const uint32_t calm_ms=since_strong>1000u?since_strong-1000u:0u;
+  view_.angry=std::fmax(0.f,view_.angry-std::fmin(float(elapsed),float(calm_ms))*0.00019f);
   const bool fresh=sampled_ && uint32_t(now-last_sample_)<=300;
   while(remaining>0.f){
    const float dt=std::fmin(0.008f,remaining);remaining-=dt;
@@ -58,7 +89,7 @@ public:
   }
   if(view_.squash<0.003f)view_.squash=0.f;
   if(view_.impact<0.003f)view_.impact=0.f;
-  view_.active=std::fabs(vx_)+std::fabs(vy_)>3.f || view_.dizzy>0.f || view_.impact>0.f || std::fabs(view_.angle)>0.1f;
+  view_.active=std::fabs(vx_)+std::fabs(vy_)>3.f || view_.dizzy>0.f || view_.impact>0.f || view_.angry>0.f || std::fabs(view_.angle)>0.1f;
   return view_;
  }
 
@@ -68,9 +99,12 @@ public:
 private:
  PetMotionView view_;
  bool started_=false,sampled_=false;
- uint32_t last_update_=0,last_sample_=0,last_activity_=0,last_hit_=0,hits_=0;
+ uint32_t last_update_=0,last_sample_=0,last_activity_=0,last_hit_=0,hits_=0,last_strong_=0;
+ uint32_t jerk_window_=0,last_jerk_=0;
+ uint8_t heavy_jerks_=0;
  float vx_=0.f,vy_=0.f,gx_=0.f,gy_=0.f,force_x_=0.f,force_y_=0.f;
  float anchor_x_=0.f,anchor_y_=0.f,anchor_z_=0.f,phase_=0.f;
+ float previous_x_=0.f,previous_y_=0.f,previous_z_=0.f,agitation_=0.f;
  static float limit(float value,float low,float high){return std::fmax(low,std::fmin(high,value));}
  static float deadzone(float value){return std::fabs(value)<0.035f?0.f:value-std::copysign(0.035f,value);}
  void collide(uint32_t now,float dt) {

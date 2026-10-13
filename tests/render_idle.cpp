@@ -11,6 +11,11 @@ int main(){
  r.painted(35,2,true);
  assert(!r.due(67,2,false,false));assert(r.due(68,2,false,false));
  r.painted(68,2,false);assert(!r.due(10000,2,false,false));
+ // A static face changing to sleepy or back to happy still needs one paint,
+ // even though position, battery, and connection state have not changed.
+ assert(r.due(10001,2,false,false,7));r.painted(10001,2,false,7);
+ assert(!r.due(20000,2,false,false,7));
+ assert(r.due(20001,2,false,false,0));r.painted(20001,2,false,0);
  r.painted(0xfffffff0u,2,true);
  assert(!r.due(16,2,false,false));assert(r.due(17,2,false,false));
  puts("render idle: static, state changes, wake, final animation frame and wrap passed");

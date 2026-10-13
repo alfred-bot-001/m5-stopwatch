@@ -6,6 +6,6 @@
 #define PET_SCREEN_CENTER 233.0f
 #define PET_SCREEN_RADIUS 231.0f
 #define PET_SPRITE_SIZE 240
-// The original alpha silhouette fits radius 115.4 at this sprite size; 124
-// also covers the largest impact squash and sampling/antialiasing margins.
+// All eight aligned expression silhouettes fit radius 120.74 including the
+// largest impact squash; 124 includes sampling/antialiasing margins and Zs.
 #define PET_BODY_RADIUS 124.0f

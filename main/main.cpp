@@ -68,7 +68,8 @@ static std::atomic<bool> pm_ready{false},pm_boost{false};
 static std::atomic<bool> imu_ready{false};
 static std::atomic<unsigned> imu_samples{0},imu_failures{0},pet_hits{0};
 static std::atomic<unsigned> imu_read_us{0},pet_render_us{0};
-static std::atomic<int> imu_ax{0},imu_ay{0},imu_az{0},pet_x{233},pet_y{233},pet_dizzy{0};
+static std::atomic<int> imu_ax{0},imu_ay{0},imu_az{0},pet_x{233},pet_y{233},pet_dizzy{0},pet_angry{0};
+static std::atomic<unsigned> pet_expression{0},pet_mouth{0};
 static bool wireless_safe_boot=false;
 static TaskHandle_t main_task=nullptr;
 static std::atomic<bool> listen_requested{false},capture_enabled{false},mic_running{false};
@@ -209,7 +210,7 @@ extern "C" void vibe_status(char *out,size_t size) {
  snprintf(out+used,size-used," key_guard=%d bat_pct=%d bat_mv=%u bat_ring=%d pm_mode=%02x pm_out=%02x pm_ok=%d pm_boost=%d cpu_floor=%d frames=%u hist=%d/%u/%u hist_drop=%u hist_err=%u ctrl_stack=%u",int(power_key_guard_ok),battery_percent.load(),battery_filtered_mv.load(),int(battery_ring_ready),pmic_mode.load(),pmic_out.load(),int(pm_ready.load()),int(pm_boost.load()),pm_ready.load()?80:240,painted_frames.load(),int(hist.ready),unsigned(hist.session),unsigned(hist.records),unsigned(hist.dropped),unsigned(hist.errors),unsigned(vibe_usb_control_stack()));used=strlen(out);
  const auto &previous_pm=previous_pmic_diagnostic.snapshot;
  snprintf(out+used,size-used," pm_irq=%06x pm_mask=%06x pm_irq_ok=%d pm_diag=%d/%u/%u pm_save_ms=%u pm_prev=%d,%u,%u,%02x,%02x,%02x,%02x,%02x,%02x",pmic_irq.load(),pmic_irq_mask.load(),int(pmic_irq_valid.load()),int(pmic_diag_enabled.load()),pmic_diag_writes.load(),pmic_diag_errors.load(),pmic_diag_saved_ms.load(),int(previous_pmic_diagnostic.valid),unsigned(previous_pm.sequence),unsigned(previous_pm.uptime_ms),unsigned(previous_pm.button),unsigned(previous_pm.config),unsigned(previous_pm.wake),unsigned(previous_pm.power),unsigned(previous_pm.flags),unsigned(previous_pm.irq3));used=strlen(out);
- char radio[1024];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d imu=%d imu_samples=%u imu_fail=%u accel=%d,%d,%d pet=%d,%d hits=%u dizzy=%d imu_us=%u render_us=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),int(imu_ready.load()),imu_samples.load(),imu_failures.load(),imu_ax.load(),imu_ay.load(),imu_az.load(),pet_x.load(),pet_y.load(),pet_hits.load(),pet_dizzy.load(),imu_read_us.load(),pet_render_us.load(),radio);
+ char radio[1024];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d imu=%d imu_samples=%u imu_fail=%u accel=%d,%d,%d pet=%d,%d hits=%u dizzy=%d angry=%d face=%u mouth=%u imu_us=%u render_us=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),int(imu_ready.load()),imu_samples.load(),imu_failures.load(),imu_ax.load(),imu_ay.load(),imu_az.load(),pet_x.load(),pet_y.load(),pet_hits.load(),pet_dizzy.load(),pet_angry.load(),pet_expression.load(),pet_mouth.load(),imu_read_us.load(),pet_render_us.load(),radio);
 }
 extern "C" void app_main() {
  main_task=xTaskGetCurrentTaskHandle();
@@ -287,7 +288,9 @@ extern "C" void app_main() {
  M5Canvas canvas(&M5.Display);canvas.setColorDepth(16);canvas.setPsram(true);
  assert(canvas.createSprite(PET_SCREEN_SIZE,PET_SCREEN_SIZE));
  screen_lock=xSemaphoreCreateMutex();assert(screen_lock);screen=&canvas;
- CharacterRenderer character;character_ready=character.begin();
+ // Eight cached expression canvases have application lifetime. Keep their
+ // control objects off the main task's bounded stack (pixel data uses PSRAM).
+ static CharacterRenderer character;character_ready=character.begin();
  BatteryRing battery_ring;battery_ring_ready=battery_ring.begin();
  BatteryLevel battery_level;
  int last_drawn_battery=-1;
@@ -411,11 +414,14 @@ extern "C" void app_main() {
   const auto &pet_view=pet.advance(now);
   pet_x=int(std::lround(pet_view.x));pet_y=int(std::lround(pet_view.y));
   pet_hits=pet.hits();pet_dizzy=int(std::lround(pet_view.dizzy*100.f));
-  character.update(now,listen_requested.load() && mic_running.load(),level.load());
+  pet_angry=int(std::lround(pet_view.angry*100.f));
   const bool real_activity=display_activity.exchange(false) || listen_requested.load() || motion_activity;
   if(real_activity)wireless_activity();
   bool awake=display_idle.update(now,real_activity);
   display_idle_ms=display_idle.idle_ms(now);
+  character.update(now,listen_requested.load() && mic_running.load(),level.load(),pet_view,display_idle.idle_ms(now));
+  pet_expression=unsigned(character.expression());
+  pet_mouth=unsigned(std::lround(character.mouth_open()*100.f));
   if(!awake){
    if(was_awake)M5.Display.setBrightness(0);
    display_awake=false;
@@ -435,7 +441,7 @@ extern "C" void app_main() {
    |(uint64_t(mic_ok)<<26)|(uint64_t(listen_requested.load() && mic_running.load())<<27)
    |(uint64_t(wireless_ready())<<28)|(uint64_t(radio.initialized)<<29)
    |(uint64_t(unsigned(radio.error)&0xffffffffu)<<32);
-  if(!render_idle.due(now,scene,animation,waking)){
+  if(!render_idle.due(now,scene,animation,waking,pet_expression.load())){
    vTaskDelay(pdMS_TO_TICKS(display_idle.idle_ms(now)>=5000 && !animation?20:8));continue;
   }
   power_runtime.boost(true);
@@ -466,7 +472,7 @@ extern "C" void app_main() {
   if(waking)M5.Display.setBrightness(screen_brightness);
   display_awake=true;
   xSemaphoreGive(screen_lock);
-  render_idle.painted(now,scene,animation);++painted_frames;
+  render_idle.painted(now,scene,animation,pet_expression.load());++painted_frames;
   power_runtime.boost(interaction_boost);pm_boost=power_runtime.held();
   vTaskDelay(pdMS_TO_TICKS(8));
  }
