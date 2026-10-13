@@ -63,6 +63,13 @@ int main(){
   display.update(now,false);
  }
  assert(saw_wink&&saw_sleepy&&!display.awake());
+ // The wink lasts long enough for the renderer's 360 ms crossfade to reach
+ // its closed-eye design before returning to happy.
+ PetExpressionState blink;blink.update(0,false,0.f,motion,0);
+ assert(blink.update(9000,false,0.f,motion,9000).expression==PetExpression::Wink);
+ assert(blink.update(9400,false,0.f,motion,9400).expression==PetExpression::Wink);
+ assert(blink.update(9649,false,0.f,motion,9649).expression==PetExpression::Wink);
+ assert(blink.update(9650,false,0.f,motion,9650).expression==PetExpression::Happy);
  assert(rest.update(1800120,true,0.f,motion,0).expression==PetExpression::Happy);
  // Invalid telemetry is harmless and does not synthesize expressions. A long
  // pause closes the mouth instead of prolonging the old audio animation.

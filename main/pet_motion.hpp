@@ -2,9 +2,13 @@
 #include <cmath>
 #include <cstdint>
 #include "pet_layout.h"
+#include "pet_orientation.hpp"
 
 struct PetMotionView {
  float x=PET_SCREEN_CENTER,y=PET_SCREEN_CENTER,angle=0.f,squash=0.f,dizzy=0.f,impact=0.f,angry=0.f;
+ // Clockwise screen-space orientation, plus a small relative bounce wobble.
+ // The complete angle is wrapped to [-180,180); a nonzero rest angle is idle.
+ float upright_angle=0.f,sway=0.f;
  bool active=false;
 };
 
@@ -20,6 +24,7 @@ public:
  bool sample(uint32_t now,float ax,float ay,float az,float gyro_speed) {
   if(!std::isfinite(ax)||!std::isfinite(ay)||!std::isfinite(az)||!std::isfinite(gyro_speed))return false;
   ax=limit(ax,-4.f,4.f);ay=limit(ay,-4.f,4.f);az=limit(az,-4.f,4.f);
+  orientation_.sample(now,ax,ay,az,gyro_speed);
   const bool first=!sampled_;
   const uint32_t elapsed=first?0u:uint32_t(now-last_sample_);
   const float dt=std::fmin(0.25f,elapsed*0.001f);
@@ -66,6 +71,7 @@ public:
  }
 
  const PetMotionView &advance(uint32_t now) {
+  view_.upright_angle=orientation_.advance(now);
   if(!started_){last_update_=now;started_=true;return view_;}
   const uint32_t elapsed=uint32_t(now-last_update_);
   float remaining=std::fmin(0.064f,elapsed*0.001f);last_update_=now;
@@ -85,11 +91,13 @@ public:
    if(uint32_t(now-last_hit_)>700)view_.dizzy=std::fmax(0.f,view_.dizzy-dt*0.13f);
    phase_=std::fmod(phase_+dt*5.f,6.283185307f);
    const float target=limit(vx_*0.055f+std::sin(phase_)*view_.dizzy*6.f,-12.f,12.f);
-   view_.angle+=(target-view_.angle)*(1.f-std::exp(-dt/0.13f));
+   view_.sway+=(target-view_.sway)*(1.f-std::exp(-dt/0.13f));
   }
   if(view_.squash<0.003f)view_.squash=0.f;
   if(view_.impact<0.003f)view_.impact=0.f;
-  view_.active=std::fabs(vx_)+std::fabs(vy_)>3.f || view_.dizzy>0.f || view_.impact>0.f || view_.angry>0.f || std::fabs(view_.angle)>0.1f;
+  if(std::fabs(view_.sway)<0.01f)view_.sway=0.f;
+  view_.angle=PetOrientation::wrap(view_.upright_angle+view_.sway);
+  view_.active=std::fabs(vx_)+std::fabs(vy_)>3.f || view_.dizzy>0.f || view_.impact>0.f || view_.angry>0.f || std::fabs(view_.sway)>0.1f || orientation_.active();
   return view_;
  }
 
@@ -98,6 +106,7 @@ public:
 
 private:
  PetMotionView view_;
+ PetOrientation orientation_;
  bool started_=false,sampled_=false;
  uint32_t last_update_=0,last_sample_=0,last_activity_=0,last_hit_=0,hits_=0,last_strong_=0;
  uint32_t jerk_window_=0,last_jerk_=0;

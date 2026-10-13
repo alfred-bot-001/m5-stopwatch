@@ -6,6 +6,7 @@
 #include "character_asset.hpp"
 #include "pet_expression.hpp"
 #include "pet_motion.hpp"
+#include "pet_transition.hpp"
 
 // Decode each supplied design once. All expressions use the same body scale,
 // anchor and collision envelope; switching a face never resizes the pet.
@@ -41,11 +42,16 @@ public:
   frame_.setColorDepth(16);frame_.setPsram(true);
   frame_ready_=frame_.createSprite(character_asset::width,character_asset::height)!=nullptr;
   if(frame_ready_)frame_.setPivot(character_asset::width*0.5f,character_asset::height*0.5f);
-  return all_ready && talking_ready_ && frame_ready_;
+  fade_source_.setColorDepth(16);fade_source_.setPsram(true);
+  fade_ready_=fade_source_.createSprite(character_asset::width,character_asset::height)!=nullptr;
+  transition_.prime(uint8_t(expression()));
+  return all_ready && talking_ready_ && frame_ready_ && fade_ready_;
  }
 
  void update(uint32_t now,bool listening,float rms,const PetMotionView &motion,uint32_t idle_ms) {
   expression_.update(now,listening,rms,motion,idle_ms);
+  now_=now;
+  if(transition_.target(now,uint8_t(expression()),composed_ && fade_ready_))copy(fade_source_,frame_);
   if(!started_){last_update_=now;started_=true;return;}
   const float dt=std::fmin(0.25f,uint32_t(now-last_update_)*0.001f);last_update_=now;
   if(motion.dizzy>0.03f)decoration_phase_=std::fmod(decoration_phase_+dt*1.8f,6.283185307f);
@@ -62,9 +68,10 @@ public:
   if(amplitude_==0.f && std::fabs(x_)<0.01f && std::fabs(y_)<0.01f){x_=y_=phase_=0.f;}
  }
 
- bool animating() const {return expression_.view().animating || amplitude_!=0.f || x_!=0.f || y_!=0.f;}
+ bool animating() const {return transition_.active() || expression_.view().animating || amplitude_!=0.f || x_!=0.f || y_!=0.f;}
  PetExpression expression() const {return expression_.view().expression;}
  float mouth_open() const {return expression_.view().mouth_open;}
+ uint8_t fade_percent() const {return uint8_t(unsigned(transition_.weight(now_))*100u/256u);}
 
  void draw(M5Canvas &canvas,bool,bool,bool,const PetMotionView &motion) {
   if(canvas.getColorDepth()==16 && canvas.getBuffer())
@@ -84,8 +91,13 @@ public:
    if(face==PetExpression::Happy || face==PetExpression::Talking || face==PetExpression::Dizzy)
     eyes(frame_,0.f,0.f,face==PetExpression::Dizzy?dizziness:0.f);
    if(talking)mouth(frame_,mouth_open());
+   if(transition_.active())pet_transition::blend_frame(
+    static_cast<uint16_t*>(frame_.getBuffer()),static_cast<const uint16_t*>(fade_source_.getBuffer()),
+    size_t(character_asset::width)*character_asset::height,transition_.weight(now_));
+   composed_=true;
+   transition_.frame_drawn(now_);
    const float squash=bounded(motion.squash,0.f,1.f);
-   const float angle=bounded(motion.angle,-12.f,12.f);
+   const float angle=finite_angle(motion.angle);
    if(std::fabs(angle)<0.3f && squash<0.008f){
     const int left=int(std::lround(motion.x-character_asset::width*0.5f));
     const int top=int(std::lround(motion.y-character_asset::height*0.5f));
@@ -108,10 +120,11 @@ public:
  }
 
 private:
- M5Canvas backgrounds_[character_asset::Count],talking_,frame_;
+ M5Canvas backgrounds_[character_asset::Count],talking_,frame_,fade_source_;
  PetExpressionState expression_;
- bool ready_[character_asset::Count]{},talking_ready_=false,frame_ready_=false,started_=false;
- uint32_t last_update_=0;
+ PetTransition transition_;
+ bool ready_[character_asset::Count]{},talking_ready_=false,frame_ready_=false,fade_ready_=false,composed_=false,started_=false;
+ uint32_t last_update_=0,now_=0;
  float amplitude_=0.f,phase_=0.f,decoration_phase_=0.f,x_=0.f,y_=0.f;
 
  static void copy(M5Canvas &destination,const M5Canvas &source) {
@@ -121,6 +134,7 @@ private:
  static float bounded(float value,float low,float high) {
   return std::isfinite(value)?std::fmin(high,std::fmax(low,value)):low;
  }
+ static float finite_angle(float value) {return std::isfinite(value)?std::remainder(value,360.f):0.f;}
  static character_asset::Index asset_index(PetExpression face) {
   using namespace character_asset;
   switch(face){
@@ -224,16 +238,19 @@ private:
  }
 
  void stars(M5Canvas &canvas,const PetMotionView &motion,float amount) const {
-  const float angle=bounded(motion.angle,-12.f,12.f)*0.0174532925f;
-  const float head_x=motion.x+std::sin(angle)*85.f;
-  const float head_y=motion.y-std::cos(angle)*85.f;
+  const float angle=finite_angle(motion.angle)*0.0174532925f;
+  const float cosine=std::cos(angle),sine=std::sin(angle);
   // Golden five-point stars remain recognisably gold while fading out.
   const float fade=bounded(amount*2.f,0.f,1.f);
   const uint16_t gold=canvas.color565(uint8_t(255.f*fade),uint8_t(199.f*fade),uint8_t(45.f*fade));
   const uint16_t light=canvas.color565(uint8_t(255.f*fade),uint8_t(228.f*fade),uint8_t(123.f*fade));
   for(int i=0;i<3;++i){
    const float phase=decoration_phase_+i*2.0943951f;
-   float sx=head_x+std::cos(phase)*43.f,sy=head_y+std::sin(phase)*9.f;
+   // Rotate the complete local ellipse with the head, not just its center.
+   // Its farthest tip remains within 103 px of the body pivot at every angle.
+   const float local_x=std::cos(phase)*43.f,local_y=-85.f+std::sin(phase)*9.f;
+   float sx=motion.x+local_x*cosine-local_y*sine;
+   float sy=motion.y+local_x*sine+local_y*cosine;
    const float dx=sx-PET_SCREEN_CENTER,dy=sy-PET_SCREEN_CENTER;
    // Outermost star tip remains at radius 225, inside the ring's radius 228.
    constexpr float star_bound=PET_SCREEN_RADIUS-12.f;
@@ -244,7 +261,7 @@ private:
    }
    float px[10],py[10];
    for(int point=0;point<10;++point){
-    const float direction=-1.5707963f+point*0.62831853f+0.1f*std::sin(phase);
+    const float direction=angle-1.5707963f+point*0.62831853f+0.1f*std::sin(phase);
     const float radius=point&1?2.5f:5.8f;
     px[point]=sx+std::cos(direction)*radius;py[point]=sy+std::sin(direction)*radius;
    }

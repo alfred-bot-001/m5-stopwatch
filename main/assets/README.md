@@ -22,10 +22,21 @@ composition only, Sleepy's original Zs are clipped and smaller brown Zs are draw
 near the head within the collision envelope. Its body is neither shifted nor
 shrunk relative to the other expressions. The original PNG remains unchanged.
 
-All eight PNGs are decoded once into PSRAM, plus one speaking-body cache and one
-working frame: 10 × 240 × 240 × 2 = 1,152,000 bytes. There is no PNG decode during
+All eight PNGs are decoded once into PSRAM, plus one speaking-body cache, one
+working frame and one transition-source snapshot:
+11 × 240 × 240 × 2 = 1,267,200 bytes. There is no PNG decode during
 animation. The former 1,272,050-byte source below is no longer embedded; the eight
 new PNGs total 1,093,263 bytes.
+
+Expression changes use a 360 ms smoothstep crossfade. A transition interrupted
+by a new expression starts from a snapshot of the currently displayed mixed
+frame, so repeated voice/motion changes cannot jump back to an earlier face.
+Only the local 240×240 body sprite is mixed; position, impact deformation and the
+complete gravity-relative rotation then apply to the result as one object.
+Blending explicitly decodes LGFX's byte-swapped RGB565 storage and mixes the
+5/6/5-bit channels separately. The renderer stays active until it has painted the
+final full-target frame. After settling it resumes the usual static/no-refresh
+behavior; the microphone mouth envelope continues to update during the fade.
 
 The happy/talking/dizzy white eyes are replaced locally so the original static
 pupils do not remain beneath moving pupils or spirals. The white circles are
@@ -41,6 +52,9 @@ intact, and silence restores its original closed-mouth design.
 
 Dizziness draws two spiral pupils and three orbiting, filled gold five-point
 stars. Angry faces retain their own brows and eyes even when dizzy stars remain.
+The complete elliptical star orbit and the star points rotate in the pet's local
+head coordinates through the full 360 degrees, following the body's gradual
+gravity alignment. This also keeps the orbit inside its local redraw envelope.
 Star centers are limited to radius 219 around the physical screen center; their
 5.8-pixel tips remain inside the battery ring's inner radius 228. The body and
 small Z decorations fit the existing 124-pixel collision envelope and dirty

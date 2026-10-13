@@ -8,7 +8,10 @@ static void bounded(const PetMotionView &v) {
  assert(std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.angle));
  const float dx=v.x-PetMotion::center_x,dy=v.y-PetMotion::center_y;
  assert(dx*dx+dy*dy<=(PetMotion::radius+0.001f)*(PetMotion::radius+0.001f));
- assert(std::fabs(v.angle)<=12.001f);
+ assert(v.angle>=-180.f&&v.angle<180.f);
+ assert(std::isfinite(v.upright_angle)&&v.upright_angle>=-180.f&&v.upright_angle<180.f);
+ assert(std::isfinite(v.sway)&&std::fabs(v.sway)<=12.001f);
+ assert(std::fabs(PetOrientation::delta(v.angle,v.upright_angle+v.sway))<0.001f);
  assert(v.dizzy>=0.f&&v.dizzy<=1.f&&v.squash>=0.f&&v.squash<=1.f);
  assert(std::isfinite(v.angry)&&v.angry>=0.f&&v.angry<=1.f);
 }
@@ -39,6 +42,17 @@ int main() {
  const auto hits=tilt.hits();assert(hits>0);
  for(uint32_t t=10000;t<25000;t+=25){assert(!tilt.sample(t,0.7f,0.5f,0.4f,0.f));bounded(tilt.advance(t));}
  assert(tilt.hits()==hits&&tilt.view().dizzy==0.f&&!tilt.view().active&&tilt.view().angry==0.f);
+ assert(std::fabs(PetOrientation::delta(tilt.view().angle,std::atan2(-0.7f,0.5f)*57.2957795131f))<0.2f);
+ // A rotated but motionless face is not an animation. Its nonzero resting
+ // angle and tiny gravity noise still allow the regular 30-minute sleep.
+ PetMotion sideways;DisplayIdle sideways_idle(0);
+ for(uint32_t t=0;t<=1800100;t+=25){
+  const float noise=t%50u?0.003f:-0.003f;
+  const bool active=sideways.sample(t,-1.f+noise,noise,0.f,0.1f);
+  bounded(sideways.advance(t));assert(!active);sideways_idle.update(t,active);
+ }
+ assert(!sideways_idle.awake()&&!sideways.view().active);
+ assert(std::fabs(PetOrientation::delta(sideways.view().angle,90.f))<0.3f);
  // A head-on hit rebounds along the normal instead of stopping or reflecting
  // an unrelated axis. A single contact produces one impact, not two axes.
  PetMotion normal_hit;bool bounced=false;
@@ -137,6 +151,7 @@ int main() {
   assert(std::fabs(wrap.view().x-normal.view().x)<0.001f);
   assert(std::fabs(wrap.view().dizzy-normal.view().dizzy)<0.001f);
   assert(std::fabs(wrap.view().angry-normal.view().angry)<0.001f);
+  assert(std::fabs(PetOrientation::delta(wrap.view().angle,normal.view().angle))<0.001f);
  }
  std::puts("pet motion: circular containment, bounce, settling, dizziness, sustained-shake anger, calm recovery, idle, faults and wrap passed");
 }

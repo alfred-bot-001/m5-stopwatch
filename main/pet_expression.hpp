@@ -54,7 +54,7 @@ public:
   else if(idle_ms>=120000u)view_.expression=PetExpression::Sleepy;
   else {
    const uint32_t age=uint32_t(now-started_at_);
-   const bool wink=age>=9000u && (age-9000u)%19000u<240u;
+   const bool wink=age>=9000u && (age-9000u)%19000u<650u;
    view_.expression=wink?PetExpression::Wink:PetExpression::Happy;
   }
   view_.animating=view_.mouth_open>0.f || angry || dizzy ||
