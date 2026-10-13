@@ -9,6 +9,7 @@
 - StopWatch、GEEK、C480整体构建及实际ELF USB描述符校验通过。只刷StopWatch，设备MAC与原始备份校验后执行，bootloader/分区表/app三段哈希验证通过；GEEK/C480未重刷。
 - 首轮80秒实机81条状态：`pm_ok=1/pm_boost=0/cpu_floor=80/wifi_ps=1/control_ms=80/ps_err=0/radio=1/sessions=1`始终保持，`errors/hist_err/hist_drop=0`；帧计数2→3，仅电量变化新增一帧，未持续重绘。控制任务最低余栈1400字节，主任务最低余栈3700字节。首次整分钟样本在60062ms、120092ms成功记录。
 - 最终版本修复初始化失败时的日志队列发布竞态。先导出5条，再刷最终版本并重启，导出8条；前5条逐字段完全一致，新增session=2，实测跨重启持久化及CSV导出通过。现场文件`reports/power-history-before-reboot-20261013.csv`、`reports/power-history-after-reboot-20261013.csv`，均仅存本机。
+- 最终版另进行180秒有界采样，StopWatch与GEEK的无线连接持续在线，双方连接会话计数不变，手表持续`wifi_ps=1/control_ms=80`且无应用/日志/省电错误。CoreAudio从GEEK取得完整120秒、576万静音样本，11250次回调；该窗口没有观察到PTT或USB拔插，因此只验证闲置USB音频接口保持工作，不将静音采集视为新版讲话验收。原始PCM已删除，保留统计；最终导出12条电量记录。
 - 尚未进行电流表测量、完整充放电或多日续航验收，不能给出省电百分比或小时数。新版实体讲话、拔线供电事件及一分钟电池模式记录待用户操作验证。
 
 ## StopWatch 细圆环电量显示
