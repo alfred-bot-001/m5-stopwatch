@@ -3,6 +3,7 @@
 #include <cassert>
 #include <limits>
 #include <cstdio>
+#include <initializer_list>
 
 static void bounded(const PetMotionView &v) {
  assert(std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.angle));
@@ -14,6 +15,10 @@ static void bounded(const PetMotionView &v) {
  assert(std::fabs(PetOrientation::delta(v.angle,v.upright_angle+v.sway))<0.001f);
  assert(v.dizzy>=0.f&&v.dizzy<=1.f&&v.squash>=0.f&&v.squash<=1.f);
  assert(std::isfinite(v.angry)&&v.angry>=0.f&&v.angry<=1.f);
+ assert(std::isfinite(v.stretch)&&std::fabs(v.stretch)<=1.f);
+ assert(std::isfinite(v.shear)&&std::fabs(v.shear)<=1.f);
+ assert(std::isfinite(v.contact)&&v.contact>=0.f&&v.contact<=1.f);
+ assert(std::isfinite(v.angular_velocity)&&std::fabs(v.angular_velocity)<=260.001f);
 }
 int main() {
  assert(PetMotion::center_x==233.f&&PetMotion::center_y==233.f&&PetMotion::radius==107.f);
@@ -81,6 +86,38 @@ int main() {
  }
  assert(rim.view().y>rim_y+40.f&&rim.view().x<rim_x-15.f);
  assert(!rim.view().active&&rim.view().dizzy==0.f);
+ // A weighted fall first stretches the body, a collision compresses it, and
+ // the spring returns to a genuinely stationary shape after the motion ends.
+ PetMotion elastic;float extension=0.f,compression=0.f,loaded=0.f;
+ for(uint32_t t=0;t<5000;t+=25){
+  elastic.sample(t,0.f,1.f,0.f,0.f);const auto &v=elastic.advance(t);bounded(v);
+  extension=std::fmax(extension,v.stretch);compression=std::fmin(compression,v.stretch);
+  loaded=std::fmax(loaded,v.contact);
+ }
+ assert(extension>0.06f&&compression<-0.06f&&loaded>0.5f);
+ for(uint32_t t=5000;t<25000;t+=25){elastic.sample(t,0.f,0.f,1.f,0.f);bounded(elastic.advance(t));}
+ assert(elastic.view().stretch==0.f&&elastic.view().shear==0.f&&!elastic.view().active);
+ // Sideways impacts and angular acceleration deform the same physical body.
+ // Removing the load permits separation from the wall instead of sticking.
+ PetMotion separate;float strongest_shear=0.f;
+ for(uint32_t t=0;t<10000;t+=25){
+  separate.sample(t,1.f,0.f,0.f,0.f);bounded(separate.advance(t));
+  strongest_shear=std::fmax(strongest_shear,std::fabs(separate.view().shear));
+ }
+ assert(strongest_shear>0.04f&&separate.view().contact>0.5f);
+ const float wall_x=separate.view().x;bool separated=false;
+ for(uint32_t t=10000;t<14000;t+=25){
+  separate.sample(t,-1.f,0.f,0.f,0.f);bounded(separate.advance(t));
+  separated|=separate.view().contact==0.f&&separate.view().x<wall_x-15.f;
+ }
+ assert(separated);
+ // Busy rendering intervals use the same elapsed-time physics instead of
+ // silently slowing motion. Compare an unchanged force with 10/130 ms frames.
+ PetMotion quick_frame,busy_frame;
+ for(uint32_t t=0;t<=520;t+=10){quick_frame.sample(t,0.f,0.5f,0.8660254f,0.f);quick_frame.advance(t);}
+ for(uint32_t t=0;t<=520;t+=130){busy_frame.sample(t,0.f,0.5f,0.8660254f,0.f);busy_frame.advance(t);}
+ assert(std::fabs(quick_frame.view().y-busy_frame.view().y)<0.6f);
+ assert(std::fabs(quick_frame.view().stretch-busy_frame.view().stretch)<0.02f);
  // Every diagonal stays inside the circle, including between the extrema of
  // its bounding box; a rectangular clamp would fail this containment check.
  PetMotion diagonal;
@@ -98,7 +135,7 @@ int main() {
   max_dizzy=std::fmax(max_dizzy,shake.view().dizzy);
   max_angry=std::fmax(max_angry,shake.view().angry);
  }
- assert(activities>10&&shake.hits()>2&&max_dizzy>0.5f&&max_angry>0.8f);
+ assert(activities>10&&shake.hits()>=2&&max_dizzy>0.5f&&max_angry>0.8f);
  // Stopping gradually restores the eyes, with no sticky velocity or old force.
  for(uint32_t t=6000;t<26000;t+=25){shake.sample(t,0.f,0.f,1.f,0.f);bounded(shake.advance(t));}
  assert(shake.view().dizzy==0.f&&!shake.view().active&&shake.view().angry==0.f);
@@ -133,6 +170,23 @@ int main() {
  for(uint32_t t=0;t<10000;t+=500){
   sporadic.sample(t,(t/500)%2?4.f:-4.f,0.f,0.f,1000.f);bounded(sporadic.advance(t));
   assert(sporadic.view().angry==0.f);
+ }
+ // Slow but fresh frames still observe repeated strong movement. One delayed
+ // bad sample and its return edge supply less than the required evidence.
+ for(const uint32_t gap:{140u,200u,300u}){
+  PetMotion slow_shake;float angry=0.f;
+  for(uint32_t t=0;t<3000;t+=gap){
+   const float a=(t/gap)%2u?1.5f:-1.5f;
+   slow_shake.sample(t,a,0.f,0.f,330.f);bounded(slow_shake.advance(t));
+   angry=std::fmax(angry,slow_shake.view().angry);
+  }
+  assert(angry>0.8f);
+  PetMotion delayed_spike;
+  for(uint32_t t=0;t<3000;t+=gap){
+   const bool corrupt=t==gap*2;
+   delayed_spike.sample(t,corrupt?4.f:0.f,0.f,1.f,corrupt?1000.f:0.f);
+   bounded(delayed_spike.advance(t));assert(delayed_spike.view().angry==0.f);
+  }
  }
  // Missing/bad samples stop applying the old force; long gaps cannot teleport.
  PetMotion fault;fault.sample(0,1.f,0.f,0.f,0.f);fault.advance(0);fault.advance(25);

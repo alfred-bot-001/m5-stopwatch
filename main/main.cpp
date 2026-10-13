@@ -71,6 +71,7 @@ static std::atomic<unsigned> imu_read_us{0},pet_render_us{0};
 static std::atomic<int> imu_ax{0},imu_ay{0},imu_az{0},pet_x{233},pet_y{233},pet_dizzy{0},pet_angry{0};
 static std::atomic<unsigned> pet_expression{0},pet_mouth{0},pet_fade{100};
 static std::atomic<int> pet_angle10{0},pet_upright10{0};
+static std::atomic<int> pet_stretch{0},pet_shear{0},pet_contact{0},pet_angvel10{0};
 static bool wireless_safe_boot=false;
 static TaskHandle_t main_task=nullptr;
 static std::atomic<bool> listen_requested{false},capture_enabled{false},mic_running{false};
@@ -211,7 +212,7 @@ extern "C" void vibe_status(char *out,size_t size) {
  snprintf(out+used,size-used," key_guard=%d bat_pct=%d bat_mv=%u bat_ring=%d pm_mode=%02x pm_out=%02x pm_ok=%d pm_boost=%d cpu_floor=%d frames=%u hist=%d/%u/%u hist_drop=%u hist_err=%u ctrl_stack=%u",int(power_key_guard_ok),battery_percent.load(),battery_filtered_mv.load(),int(battery_ring_ready),pmic_mode.load(),pmic_out.load(),int(pm_ready.load()),int(pm_boost.load()),pm_ready.load()?80:240,painted_frames.load(),int(hist.ready),unsigned(hist.session),unsigned(hist.records),unsigned(hist.dropped),unsigned(hist.errors),unsigned(vibe_usb_control_stack()));used=strlen(out);
  const auto &previous_pm=previous_pmic_diagnostic.snapshot;
  snprintf(out+used,size-used," pm_irq=%06x pm_mask=%06x pm_irq_ok=%d pm_diag=%d/%u/%u pm_save_ms=%u pm_prev=%d,%u,%u,%02x,%02x,%02x,%02x,%02x,%02x",pmic_irq.load(),pmic_irq_mask.load(),int(pmic_irq_valid.load()),int(pmic_diag_enabled.load()),pmic_diag_writes.load(),pmic_diag_errors.load(),pmic_diag_saved_ms.load(),int(previous_pmic_diagnostic.valid),unsigned(previous_pm.sequence),unsigned(previous_pm.uptime_ms),unsigned(previous_pm.button),unsigned(previous_pm.config),unsigned(previous_pm.wake),unsigned(previous_pm.power),unsigned(previous_pm.flags),unsigned(previous_pm.irq3));used=strlen(out);
- char radio[1024];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d imu=%d imu_samples=%u imu_fail=%u accel=%d,%d,%d pet=%d,%d hits=%u dizzy=%d angry=%d face=%u mouth=%u face_fade=%u angle10=%d upright10=%d imu_us=%u render_us=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),int(imu_ready.load()),imu_samples.load(),imu_failures.load(),imu_ax.load(),imu_ay.load(),imu_az.load(),pet_x.load(),pet_y.load(),pet_hits.load(),pet_dizzy.load(),pet_angry.load(),pet_expression.load(),pet_mouth.load(),pet_fade.load(),pet_angle10.load(),pet_upright10.load(),imu_read_us.load(),pet_render_us.load(),radio);
+ char radio[1024];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d imu=%d imu_samples=%u imu_fail=%u accel=%d,%d,%d pet=%d,%d hits=%u dizzy=%d angry=%d face=%u mouth=%u face_fade=%u angle10=%d upright10=%d stretch=%d shear=%d contact=%d angvel10=%d imu_us=%u render_us=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),int(imu_ready.load()),imu_samples.load(),imu_failures.load(),imu_ax.load(),imu_ay.load(),imu_az.load(),pet_x.load(),pet_y.load(),pet_hits.load(),pet_dizzy.load(),pet_angry.load(),pet_expression.load(),pet_mouth.load(),pet_fade.load(),pet_angle10.load(),pet_upright10.load(),pet_stretch.load(),pet_shear.load(),pet_contact.load(),pet_angvel10.load(),imu_read_us.load(),pet_render_us.load(),radio);
 }
 extern "C" void app_main() {
  main_task=xTaskGetCurrentTaskHandle();
@@ -418,6 +419,10 @@ extern "C" void app_main() {
   pet_angry=int(std::lround(pet_view.angry*100.f));
   pet_angle10=int(std::lround(pet_view.angle*10.f));
   pet_upright10=int(std::lround(pet_view.upright_angle*10.f));
+  pet_stretch=int(std::lround(pet_view.stretch*100.f));
+  pet_shear=int(std::lround(pet_view.shear*100.f));
+  pet_contact=int(std::lround(pet_view.contact*100.f));
+  pet_angvel10=int(std::lround(pet_view.angular_velocity*10.f));
   const bool real_activity=display_activity.exchange(false) || listen_requested.load() || motion_activity;
   if(real_activity)wireless_activity();
   bool awake=display_idle.update(now,real_activity);

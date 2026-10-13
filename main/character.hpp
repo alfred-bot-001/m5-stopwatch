@@ -7,6 +7,7 @@
 #include "pet_expression.hpp"
 #include "pet_motion.hpp"
 #include "pet_transition.hpp"
+#include "pet_deformation.hpp"
 
 // Decode each supplied design once. All expressions use the same body scale,
 // anchor and collision envelope; switching a face never resizes the pet.
@@ -29,7 +30,14 @@ public:
      character_asset::width-character_asset::body_x,character_asset::height-top,
      0,0,character_asset::scale,character_asset::scale);
     sprite.clearClipRect();sprite.releasePngMemory();
-    if(ready_[i] && i==character_asset::Sleepy)sleep_z(sprite);
+    if(ready_[i] && i==character_asset::Sleepy){
+     // A small original Z tail reaches source rows 74..81. Clip every pixel
+     // outside the common body, rather than retaining that isolated fragment.
+     if(ready_[character_asset::Happy])for(int y=character_asset::body_y;y<character_asset::body_y+character_asset::body_height;++y)
+      for(int x=character_asset::body_x;x<character_asset::body_x+character_asset::body_width;++x)
+       if(backgrounds_[character_asset::Happy].readPixel(x,y)==TFT_BLACK)sprite.drawPixel(x,y,TFT_BLACK);
+     sleep_z(sprite);
+    }
    }
    if(!ready_[i]){sprite.deleteSprite();all_ready=false;}
   }
@@ -79,6 +87,7 @@ public:
   else canvas.fillSprite(TFT_BLACK);
   const float dizziness=bounded(motion.dizzy,0.f,1.f);
   const auto face=expression();
+  const auto deformation=pet_deformation::make(motion.angle,motion.stretch,motion.shear);
   if(frame_ready_){
    const auto asset=asset_index(face);
    const bool talking=face==PetExpression::Talking && mouth_open()>0.025f;
@@ -96,9 +105,7 @@ public:
     size_t(character_asset::width)*character_asset::height,transition_.weight(now_));
    composed_=true;
    transition_.frame_drawn(now_);
-   const float squash=bounded(motion.squash,0.f,1.f);
-   const float angle=finite_angle(motion.angle);
-   if(std::fabs(angle)<0.3f && squash<0.008f){
+   if(deformation.identity(0.003f)){
     const int left=int(std::lround(motion.x-character_asset::width*0.5f));
     const int top=int(std::lround(motion.y-character_asset::height*0.5f));
     if(left>=0 && top>=0 && left+character_asset::width<=canvas.width()
@@ -109,14 +116,17 @@ public:
       std::memcpy(dst+size_t(top+row)*canvas.width()+left,
        src+size_t(row)*character_asset::width,character_asset::width*sizeof(uint16_t));
     }else frame_.pushSprite(&canvas,left,top,TFT_BLACK);
-   }else frame_.pushRotateZoom(&canvas,motion.x,motion.y,angle,
-     1.f+0.06f*squash,1.f-0.11f*squash,TFT_BLACK);
+   }else{
+    float matrix[6];
+    deformation.affine(motion.x,motion.y,character_asset::width*0.5f,matrix);
+    frame_.pushAffine(&canvas,matrix,TFT_BLACK);
+   }
   }else{
    const int x=int(std::lround(motion.x-character_asset::width*0.5f));
    const int y=int(std::lround(motion.y-character_asset::height*0.5f));
    draw_fallback(canvas,x,y);eyes(canvas,float(x),float(y),dizziness);
   }
-  if(dizziness>0.03f)stars(canvas,motion,dizziness);
+  if(dizziness>0.03f)stars(canvas,motion,dizziness,deformation);
  }
 
 private:
@@ -134,7 +144,6 @@ private:
  static float bounded(float value,float low,float high) {
   return std::isfinite(value)?std::fmin(high,std::fmax(low,value)):low;
  }
- static float finite_angle(float value) {return std::isfinite(value)?std::remainder(value,360.f):0.f;}
  static character_asset::Index asset_index(PetExpression face) {
   using namespace character_asset;
   switch(face){
@@ -237,22 +246,20 @@ private:
   glyph(162.f,34.f,4.f);glyph(175.f,24.f,6.f);
  }
 
- void stars(M5Canvas &canvas,const PetMotionView &motion,float amount) const {
-  const float angle=finite_angle(motion.angle)*0.0174532925f;
-  const float cosine=std::cos(angle),sine=std::sin(angle);
+ void stars(M5Canvas &canvas,const PetMotionView &motion,float amount,const pet_deformation::Transform &deformation) const {
   // Golden five-point stars remain recognisably gold while fading out.
   const float fade=bounded(amount*2.f,0.f,1.f);
   const uint16_t gold=canvas.color565(uint8_t(255.f*fade),uint8_t(199.f*fade),uint8_t(45.f*fade));
   const uint16_t light=canvas.color565(uint8_t(255.f*fade),uint8_t(228.f*fade),uint8_t(123.f*fade));
   for(int i=0;i<3;++i){
    const float phase=decoration_phase_+i*2.0943951f;
-   // Rotate the complete local ellipse with the head, not just its center.
-   // Its farthest tip remains within 103 px of the body pivot at every angle.
+   // The complete orbit follows the head's soft deformation and full rotation,
+   // keeping every tip within 116 px of the pivot, including raster rounding.
    const float local_x=std::cos(phase)*43.f,local_y=-85.f+std::sin(phase)*9.f;
-   float sx=motion.x+local_x*cosine-local_y*sine;
-   float sy=motion.y+local_x*sine+local_y*cosine;
+   const auto head_offset=deformation.apply(local_x,local_y);
+   float sx=motion.x+head_offset.x,sy=motion.y+head_offset.y;
    const float dx=sx-PET_SCREEN_CENTER,dy=sy-PET_SCREEN_CENTER;
-   // Outermost star tip remains at radius 225, inside the ring's radius 228.
+   // Even the deformed tip remains below radius 227, inside the ring at 228.
    constexpr float star_bound=PET_SCREEN_RADIUS-12.f;
    const float r2=dx*dx+dy*dy;
    if(r2>star_bound*star_bound){
@@ -261,9 +268,10 @@ private:
    }
    float px[10],py[10];
    for(int point=0;point<10;++point){
-    const float direction=angle-1.5707963f+point*0.62831853f+0.1f*std::sin(phase);
+    const float direction=-1.5707963f+point*0.62831853f+0.1f*std::sin(phase);
     const float radius=point&1?2.5f:5.8f;
-    px[point]=sx+std::cos(direction)*radius;py[point]=sy+std::sin(direction)*radius;
+    const auto tip=deformation.apply(std::cos(direction)*radius,std::sin(direction)*radius);
+    px[point]=sx+tip.x;py[point]=sy+tip.y;
    }
    for(int point=0;point<10;++point){
     const int next=(point+1)%10;
