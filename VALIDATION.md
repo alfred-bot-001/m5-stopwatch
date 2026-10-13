@@ -1,5 +1,17 @@
 # 验证记录
 
+## 持续USB供电时再次进入ROM与跨掉电诊断（2026-10-13）
+
+用户在上一轮确认绿灯消失后，再次报告黑屏闪绿灯，并明确「一直插USB，没按红键」。任何恢复前，目标MAC的303A:1001下载接口已在线，应用接口消失；这次与仅应用正常但灯闪不同。先以DTR/RTS预设false、no-reset/no-stub保存寄存器、ESP RTC、128KiB coredump及1MiB电量分区，没有写Flash。串口驱动打开仍可能改变复位原因，故`reset_raw=f555`不能独立证明最初触发源；`strap=03/force_download=0`与ESP RTC无有效CRC一并保留，coredump没有有效长度头。未据此排除崩溃或直接认定PMIC故障。
+
+电量分区取回303条有效CRC记录。session=3最后记录是3675528ms（运行约61分15秒）的charge_stop，电池4164mV、USB5112mV，屏幕和无线标志仍开；故障时间只能确定晚于此记录，不能精确等同它。此前充电状态反复切换，算法与[原厂HAL](https://github.com/m5stack/M5StopWatch-UserDemo/blob/main/main/hal/hal_pmic.cpp)一致（VIN>4V且PMG2低有效）。[官方原理图](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1242/C152-SCH_Stopwatch_PRJ_Main_VA_20251201_2026_04_24_17_46_22.pdf)中CHRG接PMG2、DONE未连接，所以不能据此区分满充、保护或其他停充，也未证明充电切换导致ROM。分区未使用扇区的原厂遗留字节不是本轮有效日志损坏。
+
+恢复原应用后，新增M5PM1 RTC RAM双槽记录及IRQ只读诊断，约每秒保存一次，写后读回与CRC校验；启动保留上一轮记录。ESP掉电可保留而PMIC自身掉电不保留的语义依据[官方手册](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1207/M5PM1_Datasheet_CN.pdf)。主线程独占诊断I2C写入，受保护维护下载通过请求/完成序号有界等待，避免周期写入吞掉新维护意图；A2前尝试记录intent=2。连续三次写入失败停写，USB遥测缓冲及可用空间门槛同步扩大到2560，控制任务栈增至10240。没有新增开机自动重启、下载锁或充电电流变更。
+
+新编解码严格编译及ASan/UBSan通过，覆盖128种单比特破坏、0–15字节截读、各截写位置、无效槽、旧确认拒绝、两次序号回绕与131075次写入/重建；维护解析器回归通过。StopWatch/GEEK/C480构建与三份实际ELF USB描述符检查通过；只刷StopWatch，三段Flash哈希校验通过。首次运行诊断写入50次、错误0；执行一次显式A2后读回有效旧槽`pm_prev=1,90,92352,01,3b,10,0f,2e,00`，标志低两位=2与维护重启吻合，验证PMIC记录确实跨此次系统重启保留。USB/GEEK无线恢复，用户确认「页面正常，绿灯已停」。
+
+本次解决的是设备恢复与现场证据缺口，反复进入ROM根因仍未确定。原始取证、构建/刷写日志及前后电量CSV仅保存在`reports/rom-recurrence-20261013T061058Z/`，不上传。
+
 ## 本次升级后的绿灯恢复（2026-10-13）
 
 用户报告底部绿灯仍闪。处理前精确匹配的 StopWatch 应用接口 `CAFE:4020` 在线，遥测运行约850秒、`radio=1/host=1/errors=0`；ESP32 正在运行应用，不能仅凭闪灯判断仍在 ROM 下载模式。`pm_pwr=0f/led_cfg_ok=1` 只证明普通 LED 控制位关闭，不能代替物理指示灯验收。结合此前刷写启动流程，电源芯片残留下载指示是合理解释，尚未证明根因。

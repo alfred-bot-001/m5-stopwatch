@@ -265,8 +265,8 @@ static void control_task(void *arg) {
     snap_pos+=tud_cdc_write(snapshot+snap_pos,n);tud_cdc_write_flush();
     if(snap_pos==snap_size){free(snapshot);snapshot=NULL;}}
   }
-  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>2048) {
-   last=now; char line[2048]; vibe_status(line,sizeof(line));
+  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>=2560) {
+   last=now; char line[2560]; vibe_status(line,sizeof(line));
    tud_cdc_write(line,strlen(line));tud_cdc_write_flush();
   }
   atomic_store(&controls_stack_min,uxTaskGetStackHighWaterMark(NULL));
@@ -292,5 +292,5 @@ void vibe_usb_init(void) {
 #else
  xTaskCreatePinnedToCore(usb_task,"usb",6144,NULL,8,NULL,0);
 #endif
- xTaskCreatePinnedToCore(control_task,"controls",8192,NULL,4,NULL,0);
+ xTaskCreatePinnedToCore(control_task,"controls",10240,NULL,4,NULL,0);
 }

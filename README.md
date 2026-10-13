@@ -82,6 +82,8 @@ clang++ -std=c++17 -Wall -Wextra -Werror tests/pet_motion.cpp -o /tmp/stopwatch-
 /tmp/stopwatch-pet-test
 clang++ -std=c++17 -Wall -Wextra -Werror tests/power_key.cpp -o /tmp/stopwatch-power-key-test
 /tmp/stopwatch-power-key-test
+clang++ -std=c++17 -Wall -Wextra -Werror tests/pmic_diagnostics.cpp -o /tmp/stopwatch-pmic-test
+/tmp/stopwatch-pmic-test
 python3 -B tests/diagnose.py
 # 在 ESP-IDF Python 环境中（需要 pyelftools）：
 python tests/usb_descriptors.py build/stopwatch_vibe.elf
@@ -98,6 +100,10 @@ v11 先显示首帧、启动 USB，再在后台启动无线。开机同时按住
 诊断串口每秒输出 `VIBE` 状态：采样计数、电平、按键、运行时间、重启原因及错误计数。v5 还包含 BOOT 引脚 `g0`、黄/蓝按键累计次数 `presses`、电源按键状态 `pm_btn` 和配置 `pm_cfg`，用于调查按黄色键后黑屏。v6 增加电源寄存器 `pm_pwr` 和 LED 配置读回校验 `led_cfg_ok`；v7 增加 PMIC 标识 `pm_id`、第二按键配置 `pm_cfg2`、GPIO 复用/驱动/输入 `pm_func`/`pm_drv`/`pm_io`，以及本轮读取是否成功的 `pm_valid`。`P` 返回 `FRAME 466 466 434312` 后接 RGB565 大端屏幕帧；C480接收器为320×240，GEEK为240×135。`tools/capture_frame.py` 按响应尺寸解码并输出PNG。
 
 维护命令必须成对发送完整行，两步间隔不超过 2 秒。进入 ROM 下载模式使用 `VIBE/1 ARM-BOOT 288485439560\n` 与 `VIBE/1 CONFIRM-BOOT 288485439560\n`。通过 M5PM1 重启整机使用 `VIBE/1 ARM-RESET 288485439560\n` 与 `VIBE/1 CONFIRM-RESET 288485439560\n`；仅在显式收到这组命令时执行一次，不会每次启动自动重启。两种确认不能混用，单字节 `B` 不再触发复位。后者会短暂断开 USB，适用于排查仅重启 ESP32 后仍保留的 PMIC 状态。
+
+重复黑屏诊断另外使用 M5PM1 的32字节 RTC RAM（0xA0–0xBF），按[官方手册](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1207/M5PM1_Datasheet_CN.pdf)可跨ESP主芯片掉电保留，PMIC自身掉电则不保证。两个16字节CRC槽交替保存约每秒的按键原值、配置、电源、唤醒、IRQ3、GPIO0、USB、黄色键、亮屏与维护意图；写后读回一致才推进，连续三次写入失败停写至下次启动。只写RTC RAM，不写Flash或电源控制寄存器。启动先保存上一轮有效槽，再开始新记录；这补充原有ESP RTC记录，不是故障自动修复。
+
+`pm_irq`/`pm_mask`低到高字节分别是IRQ1/2/3状态及掩码，仅读取、不清除、不改变中断使能；`pm_irq_ok`为本轮读取有效。`pm_diag=启用/成功写入数/错误数`，`pm_save_ms`为本轮最近成功记录时刻。`pm_prev=有效,序号,运行毫秒,按键,配置,唤醒,电源,标志,IRQ3`，后六项为十六进制；标志bit0–1为维护意图（0正常、1维护下载、2维护重启），bit2为GPIO0，bit3为USB，bit4为黄色键，bit5为亮屏。维护下载最多等待500ms让主线程保存标志；记录失败不阻止恢复入口。`pm_btn=01`曾在用户明确未按红键时持续存在，不将它或`pm_hold`直接解释为实际长按。
 
 v8 中 `mic` 表示硬件采集是否运行，`listen` 表示当前是否请求按住采音；闲置时两者应为 0，`samples` 应停止增长。`gestures` 是累计发送到队列的水平光标步数/滚轮步数，`gesture_drops` 是队列满时丢弃的事件数，不能将其当作电脑已经处理手势的证明。`drops` 包含按住黄色键但电脑未打开麦克风时主动丢弃的旧音频，不等同于录音丢帧；静音期间不增加 `underflows`。
 

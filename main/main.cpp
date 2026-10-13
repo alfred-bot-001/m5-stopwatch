@@ -5,6 +5,7 @@
 #include "buttons.hpp"
 #include "gestures.hpp"
 #include "diagnostics.hpp"
+#include "pmic_diagnostics.hpp"
 #include "display_idle.hpp"
 #include "character.hpp"
 #include "pet_motion.hpp"
@@ -51,6 +52,12 @@ static bool previous_diagnostic_valid=false;
 static uint32_t boot_reset_raw=0,boot_strap_raw=0;
 static bool led_config_ok=false;
 static bool power_key_guard_ok=false;
+static std::atomic<unsigned> pmic_irq{0},pmic_irq_mask{0};
+static std::atomic<bool> pmic_irq_valid{false},pmic_diag_enabled{false};
+static std::atomic<unsigned> pmic_checkpoint_request{0},pmic_checkpoint_done{0};
+static std::atomic<unsigned> pmic_diag_writes{0},pmic_diag_errors{0},pmic_diag_saved_ms{0};
+// Captured before USB starts and never changed afterwards.
+static vibe_pmic_diag::Selection previous_pmic_diagnostic;
 static bool mic_ok=false;
 static bool character_ready=false;
 static bool battery_ring_ready=false;
@@ -106,7 +113,13 @@ static void save_diagnostic(uint32_t now) {
  diagnostic_store(retained_diagnostic,value);
  portEXIT_CRITICAL(&diagnostic_lock);
 }
-extern "C" void vibe_note_boot_intent(){maintenance_intent=1;save_diagnostic(esp_timer_get_time()/1000);}
+extern "C" void vibe_note_boot_intent(){
+ maintenance_intent=1;save_diagnostic(esp_timer_get_time()/1000);
+ // Main owns PMIC I2C. Give it a bounded opportunity to retain this deliberate
+ // download intent before USB tears down; never make recovery depend on I2C.
+ const unsigned ticket=pmic_checkpoint_request.fetch_add(1)+1;
+ for(unsigned i=0;i<50 && pmic_checkpoint_done.load()!=ticket;++i)vTaskDelay(pdMS_TO_TICKS(10));
+}
 extern "C" uint8_t *vibe_snapshot(size_t *size) {
  if(!screen || !screen_lock)return nullptr;
  *size=PET_SCREEN_SIZE*PET_SCREEN_SIZE*2;auto *result=static_cast<uint8_t*>(malloc(*size));
@@ -194,6 +207,8 @@ extern "C" void vibe_status(char *out,size_t size) {
  size_t used=strlen(out);if(used && out[used-1]=='\n')out[--used]=0;
  VibePowerHistoryStatus hist{};vibe_power_history_status(&hist);
  snprintf(out+used,size-used," key_guard=%d bat_pct=%d bat_mv=%u bat_ring=%d pm_mode=%02x pm_out=%02x pm_ok=%d pm_boost=%d cpu_floor=%d frames=%u hist=%d/%u/%u hist_drop=%u hist_err=%u ctrl_stack=%u",int(power_key_guard_ok),battery_percent.load(),battery_filtered_mv.load(),int(battery_ring_ready),pmic_mode.load(),pmic_out.load(),int(pm_ready.load()),int(pm_boost.load()),pm_ready.load()?80:240,painted_frames.load(),int(hist.ready),unsigned(hist.session),unsigned(hist.records),unsigned(hist.dropped),unsigned(hist.errors),unsigned(vibe_usb_control_stack()));used=strlen(out);
+ const auto &previous_pm=previous_pmic_diagnostic.snapshot;
+ snprintf(out+used,size-used," pm_irq=%06x pm_mask=%06x pm_irq_ok=%d pm_diag=%d/%u/%u pm_save_ms=%u pm_prev=%d,%u,%u,%02x,%02x,%02x,%02x,%02x,%02x",pmic_irq.load(),pmic_irq_mask.load(),int(pmic_irq_valid.load()),int(pmic_diag_enabled.load()),pmic_diag_writes.load(),pmic_diag_errors.load(),pmic_diag_saved_ms.load(),int(previous_pmic_diagnostic.valid),unsigned(previous_pm.sequence),unsigned(previous_pm.uptime_ms),unsigned(previous_pm.button),unsigned(previous_pm.config),unsigned(previous_pm.wake),unsigned(previous_pm.power),unsigned(previous_pm.flags),unsigned(previous_pm.irq3));used=strlen(out);
  char radio[1024];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d imu=%d imu_samples=%u imu_fail=%u accel=%d,%d,%d pet=%d,%d hits=%u dizzy=%d imu_us=%u render_us=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),int(imu_ready.load()),imu_samples.load(),imu_failures.load(),imu_ax.load(),imu_ay.load(),imu_az.load(),pet_x.load(),pet_y.load(),pet_hits.load(),pet_dizzy.load(),imu_read_us.load(),pet_render_us.load(),radio);
 }
 extern "C" void app_main() {
@@ -218,6 +233,33 @@ extern "C" void app_main() {
  auto& pmic=M5.Power.M5pm1;
  uint8_t id[4]={0};
  if(pmic.readRegister(0x00,id,sizeof(id)))pmic_id=(unsigned(id[0])<<24)|(unsigned(id[1])<<16)|(unsigned(id[2])<<8)|id[3];
+ const bool known_pmic=id[0]==0x50 && id[1]==0x20 && id[2]==0x05 && (id[3]==0x06 || id[3]==0x53);
+ vibe_pmic_diag::Slots pmic_slots;
+ uint8_t retained_pm[32]={0};
+ // The PMIC's RTC RAM survives loss of the ESP's power domain. Read both slots
+ // before changing either; no flash wear and no writes to power/IRQ controls.
+ if(known_pmic && pmic.readRegister(vibe_pmic_diag::kBaseRegister,retained_pm,sizeof(retained_pm))){
+  for(size_t i=0;i<vibe_pmic_diag::kSlotCount;++i)pmic_slots.load(i,retained_pm+i*vibe_pmic_diag::kSlotSize,vibe_pmic_diag::kSlotSize);
+  previous_pmic_diagnostic=pmic_slots.newest();pmic_diag_enabled=true;
+ }else ++pmic_diag_errors;
+ unsigned pmic_write_failures=0;
+ auto checkpoint_pmic=[&](uint32_t stamp){
+  if(!pmic_diag_enabled.load() || !pmic_valid.load() || !pmic_irq_valid.load())return;
+  vibe_pmic_diag::Snapshot value;
+  value.uptime_ms=stamp;value.button=pmic_buttons.load();value.config=pmic_config.load();
+  value.wake=pmic_wake.load();value.power=pmic_power.load();value.irq3=pmic_irq.load()>>16;
+  value.flags=vibe_pmic_diag::flags(static_cast<vibe_pmic_diag::Intent>(maintenance_intent.load()),gpio_get_level(GPIO_NUM_0),connected.load(),yellow.load(),display_awake.load());
+  const auto pending=pmic_slots.prepare(value);vibe_pmic_diag::Slot readback{};
+  const uint8_t reg=vibe_pmic_diag::slot_register(pending.index);
+  if(pmic.writeRegister(reg,pending.raw.data(),pending.raw.size())
+     && pmic.readRegister(reg,readback.data(),readback.size()) && pmic_slots.confirm(pending,readback)){
+   ++pmic_diag_writes;pmic_diag_saved_ms=stamp;pmic_write_failures=0;
+  }else{
+   ++pmic_diag_errors;
+   // A failing diagnostic must not become an endless I2C retry workload.
+   if(++pmic_write_failures>=3)pmic_diag_enabled=false;
+  }
+ };
  if(pmic.readRegister(0x06,&power_before,1) && pmic.setLedEnLevel(false)
     && pmic.readRegister(0x06,&power_after,1)){
   led_config_ok=power_after==(power_before & ~0x10);
@@ -226,8 +268,7 @@ extern "C" void app_main() {
  // Apply the reversible guard once at boot, only to the documented register
  // map. Retain double-click power-off and the hardware download escape hatch.
  uint8_t key_before=0,key_after=0;
- if(id[0]==0x50 && id[1]==0x20 && id[2]==0x05 && (id[3]==0x06 || id[3]==0x53)
-    && pmic.readRegister(0x49,&key_before,1)){
+ if(known_pmic && pmic.readRegister(0x49,&key_before,1)){
   const uint8_t guarded=guarded_power_key_config(key_before);
   if((key_before==guarded || pmic.writeRegister8(0x49,guarded))
      && pmic.readRegister(0x49,&key_after,1)){
@@ -268,7 +309,7 @@ extern "C" void app_main() {
  if(!vibe_power_history_begin(unsigned(esp_reset_reason())))++errors;
  RenderIdle render_idle;
  DisplayIdle display_idle(uint32_t(esp_timer_get_time()/1000));
- uint32_t last_power_read=0,last_imu_read=0;unsigned attempted_session=0;Swipe swipe;PowerButtonHistory power_buttons;
+ uint32_t last_power_read=0,last_imu_read=0,last_pmic_checkpoint=0;unsigned attempted_session=0;Swipe swipe;PowerButtonHistory power_buttons;
  for(;;){
   uint32_t now=esp_timer_get_time()/1000;
   const bool interaction_boost=listen_requested.load() || yellow.load() || blue.load() || display_activity.load() || display_idle.idle_ms(now)<2000;
@@ -300,10 +341,18 @@ extern "C" void app_main() {
   // An ESP watchdog reset does not clear the PMIC's own download indicator.
   if(power_reset_requested.exchange(false)){
    maintenance_intent=2;save_diagnostic(esp_timer_get_time()/1000);
+   checkpoint_pmic(esp_timer_get_time()/1000);
    if(!pmic.writeRegister8(0x0c,0xa2)){++errors;maintenance_intent=0;save_diagnostic(esp_timer_get_time()/1000);}
   }
   if(now-last_power_read>=250){last_power_read=now;
-   uint8_t buttons[3]={0},gpio[8]={0},system[7]={0},timer[5]={0},voltage[4]={0};
+   uint8_t buttons[3]={0},gpio[8]={0},system[7]={0},timer[5]={0},voltage[4]={0},irq[6]={0};
+   // IRQ status is latched until explicitly cleared. Observe it without
+   // clearing any bit or enabling a new interrupt/wakeup source.
+   pmic_irq_valid=pmic.readRegister(0x40,irq,sizeof(irq));
+   if(pmic_irq_valid.load()){
+    pmic_irq=unsigned(irq[0])|(unsigned(irq[1])<<8)|(unsigned(irq[2])<<16);
+    pmic_irq_mask=unsigned(irq[3])|(unsigned(irq[4])<<8)|(unsigned(irq[5])<<16);
+   }
    bool buttons_ok=pmic.readRegister(0x48,buttons,sizeof(buttons));
    power_buttons.sample(buttons_ok,buttons[0],now);
    if(buttons_ok){pmic_buttons=buttons[0];pmic_config=buttons[1];pmic_config2=buttons[2];}
@@ -332,6 +381,12 @@ extern "C" void app_main() {
    power_sample.pmic_drive=pmic_drive.load();power_sample.pmic_func=pmic_func.load();
    vibe_power_history_sample(&power_sample);
    save_diagnostic(esp_timer_get_time()/1000);
+  }
+  const unsigned checkpoint_ticket=pmic_checkpoint_request.load();
+  if(uint32_t(now-last_pmic_checkpoint)>=1000 || checkpoint_ticket!=pmic_checkpoint_done.load()){
+   checkpoint_pmic(esp_timer_get_time()/1000);last_pmic_checkpoint=now;
+   // A request arriving during this write must wait for the next checkpoint.
+   pmic_checkpoint_done=checkpoint_ticket;
   }
   bool was_awake=display_idle.awake();
   bool motion_activity=false;
