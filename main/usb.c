@@ -3,6 +3,7 @@
 #include "vibe.h"
 #ifndef VIBE_RECEIVER
 #include "pet_layout.h"
+#include "power_history.hpp"
 #endif
 #include "maintenance.h"
 #include "esp_private/usb_phy.h"
@@ -82,6 +83,8 @@ void tud_hid_set_report_cb(uint8_t instance,uint8_t id,hid_report_type_t type,co
  (void)instance;(void)id;(void)type;(void)buffer;(void)size;
 }
 static _Atomic unsigned mounts,unmounts,suspends,resumes;
+static _Atomic uint32_t controls_stack_min;
+uint32_t vibe_usb_control_stack(void){return atomic_load(&controls_stack_min);}
 // Diagnostic counters only; packet generation and scheduling stay unchanged.
 static _Atomic uint32_t usb_audio_frames,usb_audio_load_bytes;
 static _Atomic uint32_t usb_audio_p94,usb_audio_p96,usb_audio_p98,usb_audio_pother;
@@ -188,6 +191,9 @@ static void control_task(void *arg) {
  (void)arg; bool pending=false; uint8_t report[8]; uint32_t last=0;
  bool mouse_pending=false;int8_t wheel=0;
  uint8_t *snapshot=NULL;size_t snap_size=0,snap_pos=0;
+#ifndef VIBE_RECEIVER
+ bool history=false,history_open=false;char history_line[384];size_t history_size=0,history_pos=0;
+#endif
  maintenance_t maintenance={0};
  for(;;) {
   vibe_service();
@@ -201,6 +207,14 @@ static void control_task(void *arg) {
   if(mouse_pending && tud_hid_ready() && tud_hid_mouse_report(REPORT_MOUSE,0,0,0,wheel,0))mouse_pending=false;
   while(tud_cdc_available()) {
    char c=tud_cdc_read_char();
+#ifndef VIBE_RECEIVER
+   if(c=='H' && !maintenance.length && !snapshot && !history){
+    history_open=vibe_power_history_export_begin();history=true;history_pos=0;
+    history_size=snprintf(history_line,sizeof(history_line),"%s",history_open?"POWER_HISTORY 1\n":"POWER_HISTORY BUSY\n");
+    continue;
+   }
+   if(c=='P' && history)continue;
+#endif
    if(c=='P' && !snapshot){snapshot=vibe_snapshot(&snap_size);snap_pos=0;
     if(snapshot){char h[64];int n=snprintf(h,sizeof(h),
 #ifdef VIBE_RECEIVER
@@ -224,16 +238,38 @@ static void control_task(void *arg) {
    }
   }
   uint32_t now=xTaskGetTickCount();
+#ifndef VIBE_RECEIVER
+  if(history){
+   if(!tud_cdc_connected()){if(history_open)vibe_power_history_export_end();history=false;history_open=false;}
+   else {
+    if(history_pos==history_size){
+     if(!history_open){history=false;history_size=0;}
+     else {
+     history_size=vibe_power_history_export_next(history_line,sizeof(history_line));history_pos=0;
+     if(history_size==SIZE_MAX){history_size=0;}
+     else if(!history_size){
+      if(tud_cdc_write_available()>=18){tud_cdc_write_str("POWER_HISTORY END\n");tud_cdc_write_flush();vibe_power_history_export_end();history=false;history_open=false;}
+     }
+     }
+    }
+    if(history_size){
+     size_t n=tud_cdc_write_available();if(n>history_size-history_pos)n=history_size-history_pos;
+     history_pos+=tud_cdc_write(history_line+history_pos,n);tud_cdc_write_flush();
+    }
+   }
+  } else
+#endif
   if(snapshot){
    if(!tud_cdc_connected()){free(snapshot);snapshot=NULL;}
    else{size_t n=tud_cdc_write_available();if(n>snap_size-snap_pos)n=snap_size-snap_pos;
     snap_pos+=tud_cdc_write(snapshot+snap_pos,n);tud_cdc_write_flush();
     if(snap_pos==snap_size){free(snapshot);snapshot=NULL;}}
   }
-  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>1536) {
-   last=now; char line[1536]; vibe_status(line,sizeof(line));
+  else if(tud_cdc_connected() && now-last>=1000 && tud_cdc_write_available()>2048) {
+   last=now; char line[2048]; vibe_status(line,sizeof(line));
    tud_cdc_write(line,strlen(line));tud_cdc_write_flush();
   }
+  atomic_store(&controls_stack_min,uxTaskGetStackHighWaterMark(NULL));
   vTaskDelay(pdMS_TO_TICKS(1));
  }
 }
@@ -256,5 +292,5 @@ void vibe_usb_init(void) {
 #else
  xTaskCreatePinnedToCore(usb_task,"usb",6144,NULL,8,NULL,0);
 #endif
- xTaskCreatePinnedToCore(control_task,"controls",6144,NULL,4,NULL,0);
+ xTaskCreatePinnedToCore(control_task,"controls",8192,NULL,4,NULL,0);
 }

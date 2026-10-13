@@ -177,7 +177,7 @@ extern "C" uint8_t *vibe_snapshot(size_t *size){
 extern "C" void vibe_note_boot_intent(){}
 extern "C" void vibe_request_power_reset(){} // Generic receiver has no M5PM1.
 extern "C" void vibe_status(char *out,size_t size){
- char radio[768];wireless_status(radio,sizeof(radio));char usb[384];vibe_usb_audio_status(usb,sizeof(usb));
+ char radio[1024];wireless_status(radio,sizeof(radio));char usb[384];vibe_usb_audio_status(usb,sizeof(usb));
  auto bl=backlight_state();uint32_t pins[5];screen_pin_state(pins);
  snprintf(out,size,"VIBE RX v=1 uptime=%lld screen=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u display_err=0x%x touch_points=%u touch_err=0x%x boot_err=0x%x screen_driver=esp_lcd spi_mhz=80 bl_pwm=%d screen_stage=%s screen_err=0x%x pca_out=%d pca_cfg=%d pca_err=0x%x bl_before=%u/%d/%u bl_config=%u/%d/%u bl_now=%u/%d/%u pins_pre=%lx/%lx/%lx/%lx/%lx pins_now=%lx/%lx/%lx/%lx/%lx main_stack_min=%u %s %s\n",
   esp_timer_get_time()/1000,int(display_ok),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),unsigned(display_power_error.load()),touch_points.load(),unsigned(touch_error.load()),unsigned(boot_error),display_awake.load()?75:0,

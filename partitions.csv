@@ -2,3 +2,4 @@
 nvs,data,nvs,0x9000,0x4000
 factory,app,factory,0x10000,4M
 coredump,data,coredump,0x410000,128K
+powlog,data,0x40,0x430000,1M

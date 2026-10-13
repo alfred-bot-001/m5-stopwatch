@@ -14,8 +14,13 @@ void wireless_state(bool listening,uint32_t session,uint16_t battery_mv,float le
 void wireless_keyboard(const uint8_t keys[8]);
 void wireless_wheel(int8_t wheel);
 void wireless_audio(const int16_t *pcm,size_t samples);
+// A real local interaction (touch or movement), not a periodic state refresh.
+// Only wakes the sender worker; no driver calls occur in this caller.
+void wireless_activity(void);
+bool wireless_power_saving(void);
 typedef struct {
  bool connected,host,listening,initialized;
+ bool power_save;uint32_t idle_ms;uint16_t control_ms;esp_err_t power_error;
  uint16_t battery_mv,level;uint32_t received,lost,activity;
  esp_err_t error;const char *stage;
 } wireless_view_t;

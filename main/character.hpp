@@ -44,6 +44,8 @@ public:
   if(amplitude_==0.f && std::fabs(x_)<0.01f && std::fabs(y_)<0.01f){x_=y_=phase_=0.f;}
  }
 
+ bool animating() const {return amplitude_!=0.f || x_!=0.f || y_!=0.f;}
+
  void draw(M5Canvas &canvas,bool,bool,bool,const PetMotionView &motion) {
   // Both final and cached sprites are native RGB565. Direct buffer copies avoid
   // the library's per-pixel PSRAM fallback; no decoding occurs during a frame.

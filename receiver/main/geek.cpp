@@ -173,7 +173,7 @@ extern "C" uint8_t *vibe_snapshot(size_t *size){
 }
 
 extern "C" void vibe_status(char *out,size_t size){
- char radio[768];wireless_status(radio,sizeof(radio));
+ char radio[1024];wireless_status(radio,sizeof(radio));
  char usb[384];vibe_usb_audio_status(usb,sizeof(usb));
  snprintf(out,size,
   "VIBE RX v=1 board=geek id=%s uptime=%lld width=%d height=%d screen=%d "

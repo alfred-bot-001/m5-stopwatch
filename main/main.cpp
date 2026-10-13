@@ -12,6 +12,10 @@
 #include "pet_layout.h"
 #include "battery_level.hpp"
 #include "battery_ring.hpp"
+#include "power_history.hpp"
+#include "power_runtime.hpp"
+#include "render_idle.hpp"
+#include "esp_private/esp_clk.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -52,6 +56,8 @@ static bool character_ready=false;
 static bool battery_ring_ready=false;
 static std::atomic<int> battery_percent{-1};
 static std::atomic<unsigned> battery_filtered_mv{0};
+static std::atomic<unsigned> pmic_mode{0},pmic_out{0},painted_frames{0};
+static std::atomic<bool> pm_ready{false},pm_boost{false};
 static std::atomic<bool> imu_ready{false};
 static std::atomic<unsigned> imu_samples{0},imu_failures{0},pet_hits{0};
 static std::atomic<unsigned> imu_read_us{0},pet_render_us{0};
@@ -133,6 +139,7 @@ extern "C" void vibe_service() {
  listen_requested=listen;
  if(!listen){capture_enabled=false;head=count=0;level=0;}
  portEXIT_CRITICAL(&lock);
+ vibe_power_history_set_ptt(listen);
  if(edge){xQueueReset(reports);xQueueReset(cursor_events);xQueueReset(wheel_events);cursor.reset();memset(previous,0,8);
   if(active)xQueueSend(reports,previous,0);
  }
@@ -185,8 +192,9 @@ extern "C" void vibe_status(char *out,size_t size) {
   pmic_events.load(),pmic_event_ms.load(),pmic_hold_ms.load(),pmic_hold_max_ms.load(),maintenance_intent.load(),unsigned(boot_reset_raw),unsigned(boot_strap_raw),unsigned(vibe_usb_lifecycle()),int(bool(REG_READ(SYSTEM_PERIP_CLK_EN1_REG)&SYSTEM_USB_DEVICE_CLK_EN)),
   unsigned(previous_diagnostic_valid),unsigned(previous_diagnostic.uptime_ms),unsigned(previous_diagnostic.intent),unsigned(previous_diagnostic.pmic_state),unsigned(previous_diagnostic.flags),unsigned(previous_diagnostic.events),unsigned(previous_diagnostic.last_event_ms),unsigned(previous_diagnostic.held_ms),unsigned(previous_diagnostic.max_held_ms),unsigned(previous_diagnostic.reset_raw),unsigned(previous_diagnostic.strap_raw),unsigned(previous_diagnostic.usb_events));
  size_t used=strlen(out);if(used && out[used-1]=='\n')out[--used]=0;
- snprintf(out+used,size-used," key_guard=%d bat_pct=%d bat_mv=%u bat_ring=%d",int(power_key_guard_ok),battery_percent.load(),battery_filtered_mv.load(),int(battery_ring_ready));used=strlen(out);
- char radio[768];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d imu=%d imu_samples=%u imu_fail=%u accel=%d,%d,%d pet=%d,%d hits=%u dizzy=%d imu_us=%u render_us=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),int(imu_ready.load()),imu_samples.load(),imu_failures.load(),imu_ax.load(),imu_ay.load(),imu_az.load(),pet_x.load(),pet_y.load(),pet_hits.load(),pet_dizzy.load(),imu_read_us.load(),pet_render_us.load(),radio);
+ VibePowerHistoryStatus hist{};vibe_power_history_status(&hist);
+ snprintf(out+used,size-used," key_guard=%d bat_pct=%d bat_mv=%u bat_ring=%d pm_mode=%02x pm_out=%02x pm_ok=%d pm_boost=%d cpu_floor=%d frames=%u hist=%d/%u/%u hist_drop=%u hist_err=%u ctrl_stack=%u",int(power_key_guard_ok),battery_percent.load(),battery_filtered_mv.load(),int(battery_ring_ready),pmic_mode.load(),pmic_out.load(),int(pm_ready.load()),int(pm_boost.load()),pm_ready.load()?80:240,painted_frames.load(),int(hist.ready),unsigned(hist.session),unsigned(hist.records),unsigned(hist.dropped),unsigned(hist.errors),unsigned(vibe_usb_control_stack()));used=strlen(out);
+ char radio[1024];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d imu=%d imu_samples=%u imu_fail=%u accel=%d,%d,%d pet=%d,%d hits=%u dizzy=%d imu_us=%u render_us=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),int(imu_ready.load()),imu_samples.load(),imu_failures.load(),imu_ax.load(),imu_ay.load(),imu_az.load(),pet_x.load(),pet_y.load(),pet_hits.load(),pet_dizzy.load(),imu_read_us.load(),pet_render_us.load(),radio);
 }
 extern "C" void app_main() {
  main_task=xTaskGetCurrentTaskHandle();
@@ -255,10 +263,16 @@ extern "C" void app_main() {
  // BMI270 uploads its configuration at begin(). Keep it after the recovery
  // frame and USB startup, and never retry initialization in the input loop.
  imu_ready=M5.Imu.begin(&M5.In_I2C,M5.getBoard());
+ PowerRuntime power_runtime;pm_ready=power_runtime.begin();
+ if(!pm_ready.load())++errors;
+ if(!vibe_power_history_begin(unsigned(esp_reset_reason())))++errors;
+ RenderIdle render_idle;
  DisplayIdle display_idle(uint32_t(esp_timer_get_time()/1000));
- uint32_t last_power_read=0,last_draw=0,last_imu_read=0;unsigned attempted_session=0;Swipe swipe;PowerButtonHistory power_buttons;
+ uint32_t last_power_read=0,last_imu_read=0;unsigned attempted_session=0;Swipe swipe;PowerButtonHistory power_buttons;
  for(;;){
   uint32_t now=esp_timer_get_time()/1000;
+  const bool interaction_boost=listen_requested.load() || yellow.load() || blue.load() || display_activity.load() || display_idle.idle_ms(now)<2000;
+  power_runtime.boost(interaction_boost);pm_boost=power_runtime.held();
   if(mic_running.load() && (!capture_enabled.load() || !listen_requested.load())){
    capture_enabled=false;M5.Mic.end();mic_running=false;
   }
@@ -298,6 +312,7 @@ extern "C" void app_main() {
    bool ok=buttons_ok && pmic.readRegister(0x10,gpio,sizeof(gpio))
     && pmic.readRegister(0x04,system,sizeof(system)) && pmic.readRegister(0x38,timer,sizeof(timer)) && pmic.readRegister(0x22,voltage,sizeof(voltage));
    if(ok){
+    pmic_mode=gpio[0];pmic_out=gpio[1];
     pmic_func=(unsigned(gpio[7])<<8)|gpio[6];pmic_drive=gpio[3];pmic_input=gpio[2];pmic_power=system[2];
     pmic_source=system[0];pmic_wake=system[1];pmic_sleep=system[5];pmic_wdt=system[6];pmic_timer=timer[4];
     pmic_seconds=unsigned(timer[0])|(unsigned(timer[1])<<8)|(unsigned(timer[2])<<16)|(unsigned(timer[3])<<24);
@@ -305,6 +320,17 @@ extern "C" void app_main() {
    pmic_valid=ok;
    battery_level.sample(now,ok,battery_mv.load());
    battery_percent=battery_level.percent();battery_filtered_mv=battery_level.filtered_mv();
+   VibePowerSample power_sample{};
+   power_sample.uptime_ms=uint64_t(esp_timer_get_time()/1000);
+   power_sample.valid=ok;power_sample.battery_mv=battery_mv.load();power_sample.usb_mv=usb_mv.load();
+   power_sample.percent=battery_percent.load();
+   power_sample.charging=ok?(usb_mv.load()>4000 && !(pmic_input.load()&4)):-1;
+   power_sample.screen_on=display_awake.load();power_sample.ptt=listen_requested.load();
+   power_sample.radio=wireless_ready();power_sample.idle=wireless_power_saving();
+   power_sample.cpu_mhz=esp_clk_cpu_freq()/1000000;
+   power_sample.pmic_mode=pmic_mode.load();power_sample.pmic_out=pmic_out.load();
+   power_sample.pmic_drive=pmic_drive.load();power_sample.pmic_func=pmic_func.load();
+   vibe_power_history_sample(&power_sample);
    save_diagnostic(esp_timer_get_time()/1000);
   }
   bool was_awake=display_idle.awake();
@@ -331,22 +357,37 @@ extern "C" void app_main() {
   pet_x=int(std::lround(pet_view.x));pet_y=int(std::lround(pet_view.y));
   pet_hits=pet.hits();pet_dizzy=int(std::lround(pet_view.dizzy*100.f));
   character.update(now,listen_requested.load() && mic_running.load(),level.load());
-  bool awake=display_idle.update(now,display_activity.exchange(false) || listen_requested.load() || motion_activity);
+  const bool real_activity=display_activity.exchange(false) || listen_requested.load() || motion_activity;
+  if(real_activity)wireless_activity();
+  bool awake=display_idle.update(now,real_activity);
   display_idle_ms=display_idle.idle_ms(now);
   if(!awake){
    if(was_awake)M5.Display.setBrightness(0);
    display_awake=false;
    // Keep input, PMIC diagnostics, USB and Wi-Fi running while pixels are dark.
-   vTaskDelay(pdMS_TO_TICKS(8));continue;
+   vTaskDelay(pdMS_TO_TICKS(20));continue;
   }
   bool waking=!was_awake;
   bool held=yellow.load();
-  if(!waking && uint32_t(now-last_draw)<((held||pet_view.active)?33u:100u)){vTaskDelay(pdMS_TO_TICKS(8));continue;}
-  last_draw=now;
+  wireless_view_t radio;wireless_view(&radio);
+  const int ring_percent=battery_percent.load();
+  const bool animation=held || pet_view.active || character.animating();
+  // Quantized resting pose plus visible status: radio heartbeats and unchanged
+  // voltage samples cannot turn a static picture into a periodic redraw.
+  const uint64_t scene=uint64_t(uint16_t(std::lround(pet_view.x)))
+   |(uint64_t(uint16_t(std::lround(pet_view.y)))<<9)
+   |(uint64_t(ring_percent+1)<<18)|(uint64_t(held)<<25)
+   |(uint64_t(mic_ok)<<26)|(uint64_t(listen_requested.load() && mic_running.load())<<27)
+   |(uint64_t(wireless_ready())<<28)|(uint64_t(radio.initialized)<<29)
+   |(uint64_t(unsigned(radio.error)&0xffffffffu)<<32);
+  if(!render_idle.due(now,scene,animation,waking)){
+   vTaskDelay(pdMS_TO_TICKS(display_idle.idle_ms(now)>=5000 && !animation?20:8));continue;
+  }
+  power_runtime.boost(true);
   xSemaphoreTake(screen_lock,portMAX_DELAY);
   const int64_t render_start=esp_timer_get_time();
   character.draw(canvas,held,listen_requested.load() && mic_running.load(),mic_ok,pet_view);
-  wireless_view_t radio;wireless_view(&radio);char footer[48];
+  char footer[48];
   if(wireless_safe_boot)snprintf(footer,sizeof(footer),"USB SAFE / WIFI OFF");
   else if(radio.error!=ESP_OK)snprintf(footer,sizeof(footer),"USB / WIFI ERR %X",unsigned(radio.error));
   else snprintf(footer,sizeof(footer),"%s",wireless_ready()?"WIRELESS":(radio.initialized?"USB / SEARCHING":"USB / STARTING WIFI"));
@@ -359,7 +400,6 @@ extern "C" void app_main() {
   const uint16_t dot=!mic_ok?TFT_RED:(held?canvas.color565(255,181,54)
    :(listen_requested.load()&&mic_running.load()?TFT_CYAN:canvas.color565(32,79,76)));
   canvas.drawSpot(PET_SCREEN_CENTER,dot_y,3.f,dot);
-  const int ring_percent=battery_percent.load();
   battery_ring.draw(canvas,ring_percent);
   // An updated arc must reach the whole perimeter, including pixels outside
   // the pet/footer dirty rectangles. Ordinary animation keeps partial pushes.
@@ -371,6 +411,8 @@ extern "C" void app_main() {
   if(waking)M5.Display.setBrightness(screen_brightness);
   display_awake=true;
   xSemaphoreGive(screen_lock);
+  render_idle.painted(now,scene,animation);++painted_frames;
+  power_runtime.boost(interaction_boost);pm_boost=power_runtime.held();
   vTaskDelay(pdMS_TO_TICKS(8));
  }
 }

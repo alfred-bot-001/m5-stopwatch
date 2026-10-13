@@ -1,6 +1,7 @@
 #include "wireless.h"
 #include "wire_protocol.hpp"
 #include "station_reconnect.hpp"
+#include "radio_idle.hpp"
 #include "pairing.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
@@ -33,6 +34,7 @@ static QueueHandle_t keys_out,wheels_out;
 static uint32_t usb_epoch=0; // invalidated by USB or control-link loss; guarded
 static bool receiver_armed=false;
 #else
+struct QueuedAudio{Audio packet;uint32_t captured_at;};
 static QueueHandle_t controls,audios;
 #endif
 static std::atomic<bool> init_requested{false},radio_running{false};
@@ -51,6 +53,10 @@ static std::atomic<int> tcp_disconnect_error{0};
 static StationEvent station_event=StationEvent::none;
 static uint32_t station_event_sequence=0;
 static StationEventGate station_event_gate;
+static std::atomic<uint32_t> local_activity_ms{0},radio_idle_ms{0},control_period_ms{20};
+static std::atomic<bool> radio_power_save{false},radio_audio_awake{true};
+static std::atomic<esp_err_t> power_save_error{ESP_OK};
+static TaskHandle_t sender_control_task=nullptr; // guarded through notification/delete
 #endif
 static esp_err_t radio_fail(const char *stage,esp_err_t error,int detail=0){
  esp_err_t expected=ESP_OK;
@@ -184,41 +190,99 @@ static void service_station(StationReconnect &policy,uint32_t &observed_sequence
   esp_wifi_disconnect();
  }
 }
+static void wake_sender(){
+ // Serialize the nonblocking notification with handle retirement. A fatal
+ // radio error can stop/delete the worker while a USB callback is publishing.
+ portENTER_CRITICAL(&guard);
+ if(radio_running.load() && sender_control_task)xTaskNotifyGive(sender_control_task);
+ portEXIT_CRITICAL(&guard);
+}
+extern "C" void wireless_activity(){local_activity_ms=now_ms();wake_sender();}
+extern "C" bool wireless_power_saving(){return radio_power_save.load();}
+static void queue_control(const Control &p){
+ if(wireless_ready() && controls && xQueueSend(controls,&p,0)!=pdTRUE)queue_fault=true;
+ wake_sender();
+}
 static void publish_keys(const uint8_t *keys,int8_t wheel){
  Control p;
- portENTER_CRITICAL(&guard);if(keys)memcpy(state.keys,keys,8);p=state;portEXIT_CRITICAL(&guard);
+ portENTER_CRITICAL(&guard);
+ bool changed=keys && memcmp(state.keys,keys,8)!=0;
+ if(keys)memcpy(state.keys,keys,8);
+ p=state;
+ portEXIT_CRITICAL(&guard);
  p.wheel=wheel;
- if(wireless_ready() && controls && xQueueSend(controls,&p,0)!=pdTRUE)queue_fault=true;
+ if(!changed && !wheel)return; // Repeated zero reports are not user activity.
+ local_activity_ms=now_ms();queue_control(p);
 }
 extern "C" void wireless_keyboard(const uint8_t *keys){publish_keys(keys,0);}
 extern "C" void wireless_wheel(int8_t wheel){publish_keys(nullptr,wheel);}
 extern "C" void wireless_state(bool listening,uint32_t session,uint16_t battery,float level){
- portENTER_CRITICAL(&guard);state.listening=listening;state.session=session;state.battery_mv=battery;
- state.level=uint16_t(std::min(1.f,std::max(0.f,level))*65535);portEXIT_CRITICAL(&guard);
+ Control p;
+ portENTER_CRITICAL(&guard);bool changed=bool(state.listening)!=listening;
+ state.listening=listening;state.session=session;state.battery_mv=battery;
+ state.level=uint16_t(std::min(1.f,std::max(0.f,level))*65535);p=state;portEXIT_CRITICAL(&guard);
+ if(changed){local_activity_ms=now_ms();queue_control(p);}
 }
 extern "C" void wireless_audio(const int16_t *pcm,size_t n){
  static uint32_t sequence=0;
  if(n!=audio_samples || !wireless_ready() || !audios)return;
- Audio p;p.token=token.load();p.sequence=++sequence;
+ QueuedAudio pending;Audio &p=pending.packet;
+ pending.captured_at=now_ms();p.token=token.load();p.sequence=++sequence;
  portENTER_CRITICAL(&guard);p.session=state.session;bool listen=state.listening;portEXIT_CRITICAL(&guard);
  if(!listen)return;
  memcpy(p.pcm,pcm,sizeof(p.pcm));
- if(xQueueSend(audios,&p,0)!=pdTRUE)++tx_errors;
+ if(xQueueSend(audios,&pending,0)!=pdTRUE)++tx_errors;
 }
 static void sender_audio(void*){
  int fd=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);
  if(fd<0){radio_fail("audio_socket",ESP_FAIL,errno);return;}
  if(!socket_timeouts(fd)){int error=errno;close(fd);radio_fail("audio_options",ESP_FAIL,error);return;}
- auto remote=address(audio_port,"192.168.7.1");Audio p;
- while(radio_running.load()){if(xQueueReceive(audios,&p,pdMS_TO_TICKS(100))!=pdTRUE)continue;
-  if(!wireless_ready() || p.token!=token.load())continue;
-  portENTER_CRITICAL(&guard);bool valid_session=state.listening && p.session==state.session;portEXIT_CRITICAL(&guard);
-  if(!valid_session)continue;
+ auto remote=address(audio_port,"192.168.7.1");QueuedAudio pending;
+ while(radio_running.load()){if(xQueueReceive(audios,&pending,pdMS_TO_TICKS(100))!=pdTRUE)continue;
+  Audio &p=pending.packet;AudioWake::Action action;
+  do{
+   portENTER_CRITICAL(&guard);
+   bool valid_session=wireless_ready() && p.token==token.load() && state.listening && p.session==state.session;
+   action=AudioWake::poll(now_ms(),pending.captured_at,valid_session,radio_audio_awake.load());
+   portEXIT_CRITICAL(&guard);
+   if(action==AudioWake::Action::wait)vTaskDelay(pdMS_TO_TICKS(2));
+  }while(action==AudioWake::Action::wait);
+  // Retain the first captured frame while NONE completes, with only the
+  // existing six-frame queue behind it. Releases/link loss/session changes
+  // cancel the wait; a failed wake cannot deliver stale speech indefinitely.
+  if(action!=AudioWake::Action::send)continue;
   if(sendto(fd,&p,sizeof(p),0,(sockaddr*)&remote,sizeof(remote))==sizeof(p))++tx_audio_count;else ++tx_errors;
  }
  close(fd);
 }
 static void sender_control(void*){
+ portENTER_CRITICAL(&guard);sender_control_task=xTaskGetCurrentTaskHandle();portEXIT_CRITICAL(&guard);
+ local_activity_ms=now_ms();
+ uint32_t ps_attempt_ms=0;bool ps_attempted=false;
+ auto power=[&](bool connected,bool packet_active=false){
+  uint32_t now=now_ms();
+  portENTER_CRITICAL(&guard);
+  bool held=packet_active || has_input(state);
+  uint32_t activity=local_activity_ms.load();
+  bool want=RadioIdle::saving(now,activity,held,connected);
+  radio_idle_ms=RadioIdle::idle_ms(now,activity,held);control_period_ms=RadioIdle::interval(want);
+  bool change=want!=radio_power_save.load();
+  // Set the audio gate while holding the state lock: a new listening session
+  // either prevents sleep here, or sees this gate until NONE has completed.
+  if(change && want)radio_audio_awake=false;
+  portEXIT_CRITICAL(&guard);
+  if(!change)return;
+  // An optional power-saving failure must never kill a working radio. Bound
+  // retries, but always attempt an immediate transition out of modem sleep.
+  if(want && power_save_error.load()!=ESP_OK && ps_attempted && uint32_t(now-ps_attempt_ms)<1000){
+   radio_audio_awake=!radio_power_save.load();return;
+  }
+  ps_attempted=true;ps_attempt_ms=now;
+  esp_err_t error=esp_wifi_set_ps(want?WIFI_PS_MIN_MODEM:WIFI_PS_NONE);
+  power_save_error=error;
+  if(error==ESP_OK)radio_power_save=want;
+  radio_audio_awake=!radio_power_save.load();
+ };
  StationReconnect reconnect;uint32_t observed_sequence=0;
  ControlLinkRecovery peer_health;
  auto healthy=[&](){peer_health.healthy();tcp_failure_run=0;tcp_failure_ms=0;};
@@ -242,6 +306,7 @@ static void sender_control(void*){
  reconnect.event(StationEvent::started,now_ms());
  while(radio_running.load()){
   peer_usb=false;token=0;xQueueReset(controls);xQueueReset(audios);queue_fault=false;
+  power(false);
   service_station(reconnect,observed_sequence);
   if(!wifi_up){healthy();vTaskDelay(pdMS_TO_TICKS(100));continue;}
   int fd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(fd<0){vTaskDelay(pdMS_TO_TICKS(100));continue;}
@@ -255,13 +320,25 @@ static void sender_control(void*){
   if(!radio_running.load()){close(fd);break;}
   healthy(); // TCP connect alone does not demonstrate a functioning receiver.
   token=ack.token;seen=now_ms();peer_usb=ack.usb!=0;++connections;
+  // Each new control session gets a fully awake grace period, even after a
+  // long outage. Sleep is only considered after stable, inactive operation.
+  local_activity_ms=now_ms();uint32_t sent_at=now_ms()-RadioIdle::active_control_ms;
   bool control_failed=false;
   while(radio_running.load() && wifi_up && !queue_fault){
+   power(true);
    Control p;
-   if(xQueueReceive(controls,&p,pdMS_TO_TICKS(20))!=pdTRUE){portENTER_CRITICAL(&guard);p=state;portEXIT_CRITICAL(&guard);}
+   if(xQueueReceive(controls,&p,0)!=pdTRUE){
+    uint32_t wait=RadioIdle::wait_ms(now_ms(),sent_at,control_period_ms.load()==RadioIdle::idle_control_ms);
+    if(wait)ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(wait));
+    if(xQueueReceive(controls,&p,0)!=pdTRUE){portENTER_CRITICAL(&guard);p=state;portEXIT_CRITICAL(&guard);}
+   }
+   // A queued key/PTT edge wakes the worker immediately and switches to NONE
+   // before either its control packet or the first audio packet is sent.
+   power(true,has_input(p));
    p.token=token.load();
    // Release can race with report generation; never advertise speech with no Option.
    if(!(p.keys[0]&0x40))p.listening=0;
+   sent_at=now_ms();
    if(!transfer(fd,&p,sizeof(p),true)||!transfer(fd,&ack,sizeof(ack),false)||ack.magic_value!=magic||ack.token!=token.load()){control_failed=true;break;}
    healthy();
    seen=now_ms();peer_usb=ack.usb!=0;
@@ -270,6 +347,8 @@ static void sender_control(void*){
   if(control_failed && radio_running.load())failed();
   vTaskDelay(pdMS_TO_TICKS(50));
  }
+ power(false);
+ portENTER_CRITICAL(&guard);sender_control_task=nullptr;portEXIT_CRITICAL(&guard);
  peer_usb=false;token=0;
 }
 extern "C" void wireless_usb(bool){}
@@ -277,6 +356,8 @@ extern "C" bool wireless_report(uint8_t*){return false;}
 extern "C" bool wireless_read_wheel(int8_t*){return false;}
 extern "C" void wireless_pcm(int16_t *out,size_t n){memset(out,0,n*2);}
 #else
+extern "C" void wireless_activity(){}
+extern "C" bool wireless_power_saving(){return false;}
 extern "C" void wireless_state(bool,uint32_t,uint16_t,float){}
 extern "C" void wireless_keyboard(const uint8_t*){}
 extern "C" void wireless_wheel(int8_t){}
@@ -390,8 +471,11 @@ extern "C" void wireless_view(wireless_view_t *v){
  v->connected=link_alive();v->initialized=radio_running.load();v->error=radio_error.load();v->stage=radio_stage.load();
 #ifdef VIBE_RECEIVER
  v->host=local_usb.load();
+ v->power_save=false;v->idle_ms=0;v->control_ms=20;v->power_error=ESP_OK;
 #else
  v->host=peer_usb.load();
+ v->power_save=radio_power_save.load();v->idle_ms=radio_idle_ms.load();
+ v->control_ms=control_period_ms.load();v->power_error=power_save_error.load();
 #endif
  v->received=rx_audio_count.load();v->activity=input_activity.load();
  portENTER_CRITICAL(&guard);v->listening=v->connected && state.listening;v->battery_mv=state.battery_mv;v->level=state.level;v->lost=audio_buffer.lost;portEXIT_CRITICAL(&guard);
@@ -417,8 +501,8 @@ extern "C" void wireless_status(char *out,size_t size){
    unsigned(tcp_failure_run.load()),unsigned(tcp_failure_ms.load()),unsigned(tcp_recoveries.load()),unsigned(tcp_disconnect_error.load()),ap.bssid[0],ap.bssid[1],ap.bssid[2],ap.bssid[3],ap.bssid[4],ap.bssid[5],unsigned(ap.primary));
 #endif
  }
- snprintf(out,size,"radio=%d host=%d sessions=%u audio_tx=%u audio_rx=%u tx_err=%u lost=%u over=%u under=%u buffered=%u remote_mv=%u remote_level=%u remote_listen=%u radio_init=%d radio_err=0x%x radio_stage=%s radio_errno=%d radio_stack_min=%u%s",
-  int(link_alive()),int(view.host),unsigned(connections.load()),unsigned(tx_audio_count.load()),unsigned(rx_audio_count.load()),unsigned(tx_errors.load()),lost,over,under,buffered,unsigned(p.battery_mv),unsigned(p.level),unsigned(p.listening),int(view.initialized),unsigned(view.error),view.stage,radio_errno.load(),unsigned(init_stack_min.load()==UINT32_MAX?0:init_stack_min.load()),wifi);
+ snprintf(out,size,"radio=%d host=%d sessions=%u audio_tx=%u audio_rx=%u tx_err=%u lost=%u over=%u under=%u buffered=%u remote_mv=%u remote_level=%u remote_listen=%u radio_init=%d radio_err=0x%x radio_stage=%s radio_errno=%d radio_stack_min=%u wifi_ps=%d radio_idle_ms=%u control_ms=%u ps_err=0x%x%s",
+  int(link_alive()),int(view.host),unsigned(connections.load()),unsigned(tx_audio_count.load()),unsigned(rx_audio_count.load()),unsigned(tx_errors.load()),lost,over,under,buffered,unsigned(p.battery_mv),unsigned(p.level),unsigned(p.listening),int(view.initialized),unsigned(view.error),view.stage,radio_errno.load(),unsigned(init_stack_min.load()==UINT32_MAX?0:init_stack_min.load()),int(view.power_save),unsigned(view.idle_ms),unsigned(view.control_ms),unsigned(view.power_error),wifi);
 }
 // Workers cannot see partially constructed queues or network state.
 static bool wait_for_radio(){
@@ -485,7 +569,7 @@ static esp_err_t initialize_radio(){
  keys_out=xQueueCreate(48,sizeof(KeyEvent));wheels_out=xQueueCreate(32,sizeof(WheelEvent));
  if(!keys_out || !wheels_out)return fail(ESP_ERR_NO_MEM);
 #else
- controls=xQueueCreate(48,sizeof(Control));audios=xQueueCreate(6,sizeof(Audio));
+ controls=xQueueCreate(48,sizeof(Control));audios=xQueueCreate(6,sizeof(QueuedAudio));
  if(!controls || !audios)return fail(ESP_ERR_NO_MEM);
 #endif
  RADIO_CHECK("heap_before_nvs",heap_caps_check_integrity_all(true)?ESP_OK:ESP_ERR_INVALID_STATE);
