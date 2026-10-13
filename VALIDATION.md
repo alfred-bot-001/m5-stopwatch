@@ -1,5 +1,13 @@
 # 验证记录
 
+## 本次升级后的绿灯恢复（2026-10-13）
+
+用户报告底部绿灯仍闪。处理前精确匹配的 StopWatch 应用接口 `CAFE:4020` 在线，遥测运行约850秒、`radio=1/host=1/errors=0`；ESP32 正在运行应用，不能仅凭闪灯判断仍在 ROM 下载模式。`pm_pwr=0f/led_cfg_ok=1` 只证明普通 LED 控制位关闭，不能代替物理指示灯验收。结合此前刷写启动流程，电源芯片残留下载指示是合理解释，尚未证明根因。
+
+先只读导出26条电量历史，确认黄色键与采音均松开，再向这台 StopWatch 发送一次现有设备 ID 匹配、两步保护的维护命令，由 M5PM1 执行 SYS_CMD `0xa2` 系统重启；未重刷固件、未设置下载锁，也未增加开机自动复位。随后应用 USB、GEEK 无线连接与闲置省电恢复，`key_guard=1/pm_cfg=3b/errors=0/hist_drop=0/hist_err=0`。重启后导出29条，原26条逐字段完全一致，新增 session=3 的 boot/minute/initial_state；电量历史保留完整。A2 不等同于让 PMIC 自身完全掉电，物理绿灯是否停止仍待用户确认。
+
+现场记录仅存本机：`reports/green-led-before-reset-20261013.jsonl`、`reports/green-led-reset-command-20261013.json`、`reports/green-led-after-reset-20261013.jsonl`、`reports/power-history-before-led-reset-20261013.csv`、`reports/power-history-after-led-reset-20261013.csv`。
+
 ## 电量历史与闲置省电（2026-10-13）
 
 - 新增1MiB独立`powlog`分区（0x430000），原NVS/app/coredump地址不变；64字节CRC记录、16384槽，按4KiB扇区循环回收。每分钟与充电/外部电源边沿记录，1秒有效采样消抖；无效读数记录未知，初始充电记`initial_state`。时间为启动编号与64位运行时长，没有虚构设备日历时间，也不输出电流/mAh估算。
