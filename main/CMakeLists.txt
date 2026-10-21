@@ -3,6 +3,8 @@ idf_component_register(SRCS "main.cpp" "usb.c" "wireless.cpp" "power_history.cpp
  "assets/frog_sad.png" "assets/frog_angry.png" "assets/frog_sleepy.png" "assets/frog_wink.png")
 idf_component_get_property(tusb_lib tinyusb COMPONENT_LIB)
 target_include_directories(${tusb_lib} PUBLIC "${COMPONENT_DIR}")
+option(VIBE_RED_DOWNLOAD_LOCK "Lock PMIC red-button download; unlocking requires full PMIC power removal" OFF)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE VIBE_RED_DOWNLOAD_LOCK=$<BOOL:${VIBE_RED_DOWNLOAD_LOCK}>)
 if(DEFINED VIBE_DISPLAY_IDLE_MS)
   target_compile_definitions(${COMPONENT_LIB} PRIVATE VIBE_DISPLAY_IDLE_MS=${VIBE_DISPLAY_IDLE_MS})
 endif()

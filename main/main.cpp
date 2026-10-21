@@ -51,7 +51,10 @@ static DiagnosticSnapshot previous_diagnostic{};
 static bool previous_diagnostic_valid=false;
 static uint32_t boot_reset_raw=0,boot_strap_raw=0;
 static bool led_config_ok=false;
-static bool power_key_guard_ok=false;
+static std::atomic<bool> power_key_guard_ok{false};
+// Opt-in only: a PMIC download lock survives ESP resets and needs complete
+// PMIC power removal to unlock. Do not infer consent from accidental presses.
+static constexpr bool red_download_lock_requested=VIBE_RED_DOWNLOAD_LOCK!=0;
 static std::atomic<unsigned> pmic_irq{0},pmic_irq_mask{0};
 static std::atomic<bool> pmic_irq_valid{false},pmic_diag_enabled{false};
 static std::atomic<unsigned> pmic_checkpoint_request{0},pmic_checkpoint_done{0};
@@ -209,7 +212,7 @@ extern "C" void vibe_status(char *out,size_t size) {
   unsigned(previous_diagnostic_valid),unsigned(previous_diagnostic.uptime_ms),unsigned(previous_diagnostic.intent),unsigned(previous_diagnostic.pmic_state),unsigned(previous_diagnostic.flags),unsigned(previous_diagnostic.events),unsigned(previous_diagnostic.last_event_ms),unsigned(previous_diagnostic.held_ms),unsigned(previous_diagnostic.max_held_ms),unsigned(previous_diagnostic.reset_raw),unsigned(previous_diagnostic.strap_raw),unsigned(previous_diagnostic.usb_events));
  size_t used=strlen(out);if(used && out[used-1]=='\n')out[--used]=0;
  VibePowerHistoryStatus hist{};vibe_power_history_status(&hist);
- snprintf(out+used,size-used," key_guard=%d bat_pct=%d bat_mv=%u bat_ring=%d pm_mode=%02x pm_out=%02x pm_ok=%d pm_boost=%d cpu_floor=%d frames=%u hist=%d/%u/%u hist_drop=%u hist_err=%u ctrl_stack=%u",int(power_key_guard_ok),battery_percent.load(),battery_filtered_mv.load(),int(battery_ring_ready),pmic_mode.load(),pmic_out.load(),int(pm_ready.load()),int(pm_boost.load()),pm_ready.load()?80:240,painted_frames.load(),int(hist.ready),unsigned(hist.session),unsigned(hist.records),unsigned(hist.dropped),unsigned(hist.errors),unsigned(vibe_usb_control_stack()));used=strlen(out);
+ snprintf(out+used,size-used," key_guard=%d key_lock_req=%d key_lock=%d bat_pct=%d bat_mv=%u bat_ring=%d pm_mode=%02x pm_out=%02x pm_ok=%d pm_boost=%d cpu_floor=%d frames=%u hist=%d/%u/%u hist_drop=%u hist_err=%u ctrl_stack=%u",int(power_key_guard_ok.load()),int(red_download_lock_requested),int(bool(pmic_config.load()&0x80)),battery_percent.load(),battery_filtered_mv.load(),int(battery_ring_ready),pmic_mode.load(),pmic_out.load(),int(pm_ready.load()),int(pm_boost.load()),pm_ready.load()?80:240,painted_frames.load(),int(hist.ready),unsigned(hist.session),unsigned(hist.records),unsigned(hist.dropped),unsigned(hist.errors),unsigned(vibe_usb_control_stack()));used=strlen(out);
  const auto &previous_pm=previous_pmic_diagnostic.snapshot;
  snprintf(out+used,size-used," pm_irq=%06x pm_mask=%06x pm_irq_ok=%d pm_diag=%d/%u/%u pm_save_ms=%u pm_prev=%d,%u,%u,%02x,%02x,%02x,%02x,%02x,%02x",pmic_irq.load(),pmic_irq_mask.load(),int(pmic_irq_valid.load()),int(pmic_diag_enabled.load()),pmic_diag_writes.load(),pmic_diag_errors.load(),pmic_diag_saved_ms.load(),int(previous_pmic_diagnostic.valid),unsigned(previous_pm.sequence),unsigned(previous_pm.uptime_ms),unsigned(previous_pm.button),unsigned(previous_pm.config),unsigned(previous_pm.wake),unsigned(previous_pm.power),unsigned(previous_pm.flags),unsigned(previous_pm.irq3));used=strlen(out);
  char radio[1024];wireless_status(radio,sizeof(radio));snprintf(out+used,size-used," main_stack_min=%u radio_safe=%d display_awake=%d display_idle_ms=%u display_timeout_ms=%u character=%d imu=%d imu_samples=%u imu_fail=%u accel=%d,%d,%d pet=%d,%d hits=%u dizzy=%d angry=%d face=%u mouth=%u face_fade=%u angle10=%d upright10=%d stretch=%d shear=%d contact=%d angvel10=%d imu_us=%u render_us=%u %s\n",unsigned(uxTaskGetStackHighWaterMark(main_task)),int(wireless_safe_boot),int(display_awake.load()),unsigned(display_idle_ms.load()),unsigned(kDisplayIdleTimeoutMs),int(character_ready),int(imu_ready.load()),imu_samples.load(),imu_failures.load(),imu_ax.load(),imu_ay.load(),imu_az.load(),pet_x.load(),pet_y.load(),pet_hits.load(),pet_dizzy.load(),pet_angry.load(),pet_expression.load(),pet_mouth.load(),pet_fade.load(),pet_angle10.load(),pet_upright10.load(),pet_stretch.load(),pet_shear.load(),pet_contact.load(),pet_angvel10.load(),imu_read_us.load(),pet_render_us.load(),radio);
@@ -268,17 +271,24 @@ extern "C" void app_main() {
   led_config_ok=power_after==(power_before & ~0x10);
   pmic_power=power_after;
  }
- // Apply the reversible guard once at boot, only to the documented register
- // map. Retain double-click power-off and the hardware download escape hatch.
- uint8_t key_before=0,key_after=0;
- if(known_pmic && pmic.readRegister(0x49,&key_before,1)){
-  const uint8_t guarded=guarded_power_key_config(key_before);
-  if((key_before==guarded || pmic.writeRegister8(0x49,guarded))
-     && pmic.readRegister(0x49,&key_after,1)){
-   pmic_config=key_after;power_key_guard_ok=key_after==guarded;
+ // Change only BTN_CFG_1 on the documented StopWatch PMIC. Preserve
+ // double-click power-off and all of BTN_CFG_2. First apply the reversible
+ // guard; the optional sticky lock must wait for initial drawing and USB.
+ auto apply_key_guard=[&](bool lock_download){
+  uint8_t key_before=0,key_after=0;
+  if(known_pmic && M5.getBoard()==m5::board_t::board_M5StopWatch
+     && pmic.readRegister(0x49,&key_before,1)){
+   const uint8_t guarded=guarded_power_key_config(key_before,lock_download);
+   if((key_before==guarded || pmic.writeRegister8(0x49,guarded))
+      && pmic.readRegister(0x49,&key_after,1)){
+    pmic_config=key_after;
+    return key_after==guarded;
+   }
   }
- }
- if(!power_key_guard_ok)++errors;
+  return false;
+ };
+ power_key_guard_ok=apply_key_guard(false);
+ if(!power_key_guard_ok.load())++errors;
  gpio_input_enable(GPIO_NUM_0);
  M5.Display.setBrightness(screen_brightness);M5.Display.fillScreen(TFT_BLACK);
  auto mc=M5.Mic.config();mc.sample_rate=48000;mc.over_sampling=1;mc.magnification=8;mc.task_priority=5;mc.task_pinned_core=1;M5.Mic.config(mc);
@@ -305,7 +315,16 @@ extern "C" void app_main() {
  canvas.setFont(&lgfx::fonts::Font2);canvas.drawString(wireless_safe_boot?"USB SAFE / WIFI OFF":"USB / STARTING WIFI",PET_SCREEN_SIZE/2,432);
  battery_ring.draw(canvas,-1); // Unknown until the first valid PMIC reading.
  canvas.pushSprite(0,0);
- vibe_usb_init();if(!wireless_safe_boot)wireless_init();
+ vibe_usb_init();
+ // Only the explicit build option enables DL_LOCK. It survives ESP resets;
+ // removing the option cannot unlock it without complete PMIC power removal.
+ // If the initial reversible guard failed, do not newly request DL_LOCK.
+ if(red_download_lock_requested && power_key_guard_ok.load()){
+  const bool lock_ok=apply_key_guard(true);
+  power_key_guard_ok=lock_ok;
+  if(!lock_ok)++errors;
+ }
+ if(!wireless_safe_boot)wireless_init();
  // BMI270 uploads its configuration at begin(). Keep it after the recovery
  // frame and USB startup, and never retry initialization in the input loop.
  imu_ready=M5.Imu.begin(&M5.In_I2C,M5.getBoard());
