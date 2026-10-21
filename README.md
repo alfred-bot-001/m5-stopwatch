@@ -55,6 +55,8 @@ python tools/power_history.py --output reports/power-history.csv
 
 `VIBE_RED_DOWNLOAD_LOCK` 默认 `OFF`。明确接受失去红键硬件下载入口后，可运行 `bash tools/build.sh -DVIBE_RED_DOWNLOAD_LOCK=ON build` 构建候选固件。该选项会保存在当前构建目录的 CMake 缓存中；之后恢复普通构建必须显式传入 `-DVIBE_RED_DOWNLOAD_LOCK=OFF`。构建本身不改变设备，刷入并启动才会写入锁定位。
 
+这台原型已于2026-10-21按用户明确选择启用ON，后续升级应保留该选择。实机短按、约5秒长按均不再触发黑屏闪灯，锁定后的USB软件维护下载及返回也已验证；双击关机配置保留为00，未专门复测实体关机/开机。详细范围见[验证记录](VALIDATION.md)。
+
 启用时先完成可逆的单击复位屏蔽、首帧和 USB 初始化，再设置 M5PM1 `BTN_CFG_1(0x49)` 的 `DL_LOCK[7]`，并读回验证；保留双击关机及原单/双击时间，完全不改 `BTN_CFG_2`。没有为红键增加其他应用动作：本机原始按键状态持续01，尚不能可靠用于息屏或快捷键。`key_lock_req` 表示本固件是否请求上锁，`key_lock` 表示实际读回的锁定位；`key_guard` 失败时会增加应用错误。
 
 [官方驱动](https://github.com/m5stack/M5PM1/blob/main/src/M5PM1.cpp)明确指出锁置1后不能通过软件清零，只有 M5PM1 本身完全断电才能解除。普通 ESP 重启、PMIC A2 系统重启、双击关机或仅拔 USB 不等于移除内置电池对 PMIC 的供电；刷回 OFF 固件也不会清掉已存在的锁。锁生效后的常规升级使用已有两步保护 USB 维护命令，它直接设置 ESP32 的下载启动位，不发送 PMIC 下载命令。若应用无法运行，恢复可能需要背面 G0/GND 辅助启动或断开内置电池；锁定状态下的实体跳线恢复尚未验收，不能承诺与原长按恢复一样方便。此选项不能代替对历史异常下载根因的调查。
